@@ -1,6 +1,4 @@
-# Pull Request
-
-## Description
+# Summary
 
 What this PR does, in a couple of sentences.
 
