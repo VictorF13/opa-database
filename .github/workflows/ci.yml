@@ -80,7 +80,7 @@ jobs:
             - name: Configure git identity
               run: |
                   git config user.name "Victor Abreu"
-                  git config user.email "your-email@example.com"
+                  git config user.email "victorabreuf13@gmail.com"
             - name: Install python-semantic-release
               run: uv tool install python-semantic-release==${{ env.PSR_VERSION }}
             - name: Release (version bump, changelog, tag, GitHub release)
