@@ -1,0 +1,149 @@
+name: ci
+
+on:
+    pull_request:
+    push:
+        branches:
+            - develop
+            - main
+
+env:
+    UV_VERSION: "0.11.16"
+    PSR_VERSION: "10.5.3"
+
+jobs:
+    check-pr-title:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Validate PR title (Conventional Commits)
+              env:
+                  TITLE: ${{ github.event.pull_request.title }}
+              run: |
+                  if [[ "$TITLE" =~ ^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-zA-Z0-9_-]+\))?:\ .+ ]]; then
+                    echo "SUCCESS: PR title follows Conventional Commits."
+                  else
+                    echo "ERROR: PR title must follow Conventional Commits (e.g. 'feat: add login')."
+                    exit 1
+                  fi
+
+    validate:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  version: ${{ env.UV_VERSION }}
+                  enable-cache: true
+            - run: uv sync
+            - run: uv run ruff format --check .
+            - run: uv run ruff check .
+            - run: uv run ty check
+
+    test:
+        runs-on: ubuntu-latest
+        needs: validate
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  version: ${{ env.UV_VERSION }}
+                  enable-cache: true
+            - run: uv sync
+            - name: Run tests (tolerate "no tests collected")
+              run: |
+                  set +e
+                  uv run pytest
+                  status=$?
+                  if [ $status -eq 5 ]; then
+                    echo "No tests found, skipping gracefully."
+                    exit 0
+                  fi
+                  exit $status
+
+    automate-release:
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(release):')
+        runs-on: ubuntu-latest
+        needs: [validate, test]
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.RELEASE_PAT }}
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  version: ${{ env.UV_VERSION }}
+                  enable-cache: true
+            - name: Configure git identity
+              run: |
+                  git config user.name "Victor Abreu"
+                  git config user.email "your-email@example.com"
+            - name: Install python-semantic-release
+              run: uv tool install python-semantic-release==${{ env.PSR_VERSION }}
+            - name: Release (version bump, changelog, tag, GitHub release)
+              env:
+                  GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+              run: semantic-release version --vcs-release
+            - name: Fast-forward develop with main
+              run: |
+                  git fetch origin develop
+                  git checkout develop
+                  git merge main --strategy-option theirs
+                  git push origin develop
+
+    prep-release-pr:
+        if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+        runs-on: ubuntu-latest
+        needs: [validate, test]
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.RELEASE_PAT }}
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  version: ${{ env.UV_VERSION }}
+                  enable-cache: true
+            - name: Install python-semantic-release
+              run: uv tool install python-semantic-release==${{ env.PSR_VERSION }}
+            - name: Build preview log and next version
+              id: prep
+              run: |
+                  git fetch origin main develop
+                  PREVIEW_LOG=$(git log origin/main..origin/develop --format="- %h %s" --no-merges)
+                  {
+                    echo "preview_log<<EOF"
+                    echo "$PREVIEW_LOG"
+                    echo "EOF"
+                  } >> "$GITHUB_OUTPUT"
+                  git checkout -B main origin/develop
+                  NEXT_VERSION=$(semantic-release version --print)
+                  echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+            - name: Open or update release PR
+              env:
+                  GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+              run: |
+                  BODY=$(cat <<EOF
+                  # Description
+
+                  This pull request prepares the next production release. Merge this when you're ready to publish the new version.
+
+                  # Commits to be added:
+
+                  ${{ steps.prep.outputs.preview_log }}
+                  EOF
+                  )
+                  EXISTING_PR=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number')
+                  if [ -z "$EXISTING_PR" ]; then
+                    gh pr create --base main --head develop \
+                      --title "chore: release v${{ steps.prep.outputs.next_version }}" \
+                      --body "$BODY"
+                  else
+                    gh pr edit "$EXISTING_PR" \
+                      --title "chore: release v${{ steps.prep.outputs.next_version }}" \
+                      --body "$BODY"
+                  fi
