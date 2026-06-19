@@ -7,10 +7,21 @@ authors = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
 maintainers = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
 requires-python = ">=3.14"
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    "click>=8.4.1",
+    "pandera>=0.32.0",
+    "polars>=1.41.2",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+]
 
 [dependency-groups]
-dev = ["prek>=0.4.5", "ruff>=0.15.18", "ty>=0.0.51"]
+dev = [
+    "prek>=0.4.5",
+    "pytest>=9.1.1",
+    "ruff>=0.15.18",
+    "ty>=0.0.51",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -25,3 +36,14 @@ src.include = ["src", "tests"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+commit_message = "chore(release): v{version}"
+commit_author = "Victor Abreu <victorabreuf13@gmail.com>"
+remote.type = "github"
+changelog.default_templates.changelog_file = "CHANGELOG.md"
+build_command = """
+uv lock
+git add uv.lock
+"""
