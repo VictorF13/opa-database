@@ -31,3 +31,14 @@ src.include = ["src", "tests"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+commit_message = "chore(release): v{version}"
+commit_author = "Victor Abreu <victorabreuf13@gmail.com>"
+remote.type = "github"
+changelog.default_templates.changelog_file = "CHANGELOG.md"
+build_command = """
+uv lock
+git add uv.lock
+"""
