@@ -49,6 +49,7 @@ dependencies = [
     { name = "click" },
     { name = "pandera" },
     { name = "polars" },
+    { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
 
@@ -64,6 +65,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.4.1" },
     { name = "pandera", specifier = ">=0.32.0" },
     { name = "polars", specifier = ">=1.41.2" },
+    { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
 ]
 
