@@ -1,0 +1,27 @@
+[project]
+name = "opa-database"
+version = "0.1.0"
+description = "Initial setup for OPA Database."
+readme = "README.md"
+authors = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
+maintainers = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
+requires-python = ">=3.14"
+license = { text = "MIT" }
+dependencies = []
+
+[dependency-groups]
+dev = ["prek>=0.4.5", "ruff>=0.15.18", "ty>=0.0.51"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+lint.extend-select = ["ALL"]
+lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
+
+[tool.ty]
+src.include = ["src", "tests"]
+rules.division-by-zero = "warn"
+rules.possibly-unresolved-reference = "warn"
+rules.unused-ignore-comment = "warn"

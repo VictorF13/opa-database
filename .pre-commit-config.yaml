@@ -1,0 +1,25 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.18
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: python
+        types: [python]
+        pass_filenames: true
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.22
+    hooks:
+      - id: uv-export
+        name: uv export dependencies
+        args: [--no-dev, --output-file, requirements.txt]
+      - id: uv-export
+        name: uv export dev dependencies
+        args: [--only-group, dev, --output-file, requirements-dev.txt]
+      - id: uv-lock
