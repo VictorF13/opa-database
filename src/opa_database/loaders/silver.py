@@ -18,12 +18,23 @@ if TYPE_CHECKING:
 
 
 def get_connection() -> psycopg.Connection:
-    """Open a connection to the silver database."""
+    """Open a connection to the silver database.
+
+    Returns:
+        psycopg.Connection: An open connection to the silver database.
+
+    """
     return psycopg.connect(settings.silver_dsn)
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    """Create the `silver` schema if it doesn't already exist."""
+    """Create the `silver` schema if it doesn't already exist.
+
+    Args:
+        conn (psycopg.Connection): An open connection to the silver
+            database.
+
+    """
     conn.execute("CREATE SCHEMA IF NOT EXISTS silver;")
 
 
@@ -57,19 +68,21 @@ def replace_period(
     worth revisiting (e.g. native partitioning by month) once it isn't.
 
     Args:
-        conn: An open connection to the silver database.
-        table: Fully-qualified table name (e.g. "silver.avl_pings").
-        df: The data to load, with columns matching the target table's
-            insertable (non-generated) columns, in order.
-        time_column: Column used to bound the period being replaced.
-        start: Inclusive start of the period being replaced.
-        end: Exclusive end of the period being replaced.
-        table_ddl: `CREATE TABLE IF NOT EXISTS` statement to run before
-            loading, so the table exists on first use. Must be a hardcoded
-            literal (not built from dynamic/user input).
-        indexes: `(index_name, CREATE INDEX ...)` pairs to drop before and
-            recreate after the load. `CREATE INDEX` statements must be
-            hardcoded literals.
+        conn (psycopg.Connection): An open connection to the silver
+            database.
+        table (str): Fully-qualified table name (e.g. "silver.avl_pings").
+        df (pl.DataFrame): The data to load, with columns matching the
+            target table's insertable (non-generated) columns, in order.
+        time_column (str): Column used to bound the period being replaced.
+        start (datetime.date): Inclusive start of the period being
+            replaced.
+        end (datetime.date): Exclusive end of the period being replaced.
+        table_ddl (LiteralString): `CREATE TABLE IF NOT EXISTS` statement
+            to run before loading, so the table exists on first use. Must
+            be a hardcoded literal (not built from dynamic/user input).
+        indexes (Sequence[tuple[str, LiteralString]]): `(index_name,
+            CREATE INDEX ...)` pairs to drop before and recreate after the
+            load. `CREATE INDEX` statements must be hardcoded literals.
 
     """
     ensure_schema(conn)

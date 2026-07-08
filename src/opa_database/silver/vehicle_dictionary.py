@@ -69,6 +69,12 @@ def load(snapshot_date: datetime.date | None = None) -> None:
     own ingestion date (`snapshot_date`) rather than a calendar period —
     same "period = bronze's own partition key" pattern as AFC's dump_date
     and GTFS's feed_version_date.
+
+    Args:
+        snapshot_date (datetime.date | None): Bronze snapshot date to
+            load. Defaults to the most recent snapshot found under
+            `bronze_root`.
+
     """
     date = snapshot_date or _find_latest_snapshot()
     path = (

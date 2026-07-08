@@ -412,6 +412,11 @@ def load(year: int, month: int) -> None:
     A month can contain zero, one, or several feed exports (Nov 2023 had
     two). Every table is loaded once per export day found, keyed by that
     day as its own single-day `feed_version_date` period.
+
+    Args:
+        year (int): Calendar year to load.
+        month (int): Calendar month to load.
+
     """
     days = _find_snapshot_days(year, month)
     with get_connection() as conn:

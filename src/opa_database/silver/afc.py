@@ -154,6 +154,11 @@ def load(year: int, month: int) -> None:
     ingested. `service_date` stays as a queryable column instead; loading
     "November" means "reprocess November's dumps," not "get November's
     ridership."
+
+    Args:
+        year (int): Calendar year to load.
+        month (int): Calendar month to load.
+
     """
     glob = (
         settings.bronze_root

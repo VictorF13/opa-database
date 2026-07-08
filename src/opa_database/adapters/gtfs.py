@@ -80,8 +80,12 @@ def ingest(year: int, month: int) -> list[Path]:
     every table is partitioned by the export date rather than a calendar
     day of service.
 
+    Args:
+        year (int): Calendar year to ingest.
+        month (int): Calendar month to ingest.
+
     Returns:
-        Paths of the bronze parquet files written.
+        list[Path]: Paths of the bronze parquet files written.
 
     """
     written: list[Path] = []

@@ -28,8 +28,12 @@ _RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/veiculos_atuais.csv"
 def ingest(snapshot_date: datetime.date | None = None) -> Path:
     """Snapshot the current vehicle dictionary into the bronze layer.
 
+    Args:
+        snapshot_date (datetime.date | None): Date to record the snapshot
+            as. Defaults to today (UTC) if not given.
+
     Returns:
-        The path of the bronze parquet file written.
+        Path: The path of the bronze parquet file written.
 
     """
     date = snapshot_date or datetime.datetime.now(tz=datetime.UTC).date()
