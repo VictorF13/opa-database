@@ -3,6 +3,7 @@
 import click
 
 from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
+from opa_database.silver import afc as silver_afc
 from opa_database.silver import avl as silver_avl
 
 _ADAPTERS = {
@@ -16,6 +17,7 @@ _REFERENCE_ADAPTERS = {
 }
 
 _SILVER_LOADERS = {
+    "afc": silver_afc,
     "avl": silver_avl,
 }
 
