@@ -10,3 +10,7 @@ sources:
           vehicle mapping. cod_veiculo is not unique even within one
           snapshot: buses get reassigned, so some codes map to more than
           one id_veiculo. See silver/vehicle_dictionary.py.
+      - name: avl_pings
+        description: >
+          Raw AVL/GPS pings, one row per vehicle position report. See
+          silver/avl.py.
