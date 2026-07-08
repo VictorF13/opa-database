@@ -123,11 +123,16 @@ def _flatten(xml_source: IO[bytes]) -> Iterator[dict[str, str | None]]:
 def ingest(year: int, month: int) -> list[Path]:
     """Ingest all raw AFC dump files for a year/month into the bronze layer.
 
-    Each dump file is a resend batch covering many service dates, not a
-    single day of data, so every dump is written as its own bronze
-    partition (keyed by the dump file's date) rather than split/merged by
-    `service_date`. Reconciling repeated/corrected events across dumps for
-    the same service date is left for a later layer.
+    Each dump file is a delayed-upload backlog covering many service
+    dates, not a single day of data: validators without live connectivity
+    buffer transactions locally and upload their backlog whenever they
+    reconnect, so a dump named for the day it arrived can contain
+    `service_date`s going back weeks. Every dump is written as its own
+    bronze partition (keyed by the dump file's date) rather than split by
+    `service_date`. This isn't a resend/correction system — `event_id` is
+    globally unique across dumps (verified: zero overlap across all 435
+    day-pairs in November 2023), so each transaction is uploaded exactly
+    once, just possibly late.
 
     Returns:
         Paths of the bronze parquet files written.

@@ -33,8 +33,8 @@ def replace_period(
     df: pl.DataFrame,
     *,
     time_column: str,
-    start: datetime.datetime,
-    end: datetime.datetime,
+    start: datetime.date,
+    end: datetime.date,
     table_ddl: LiteralString,
     indexes: Sequence[tuple[str, LiteralString]] = (),
 ) -> None:
