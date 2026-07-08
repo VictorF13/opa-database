@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: dim_afc_trip
+    description: >
+      One row per real AFC trip instance. trip_id is a surrogate key
+      (md5 hash of the full ancestor chain: service date, category,
+      company, vehicle, line, trip timing/turnstiles), since the raw
+      feed has no single natural id for a trip.
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+          - unique
+      - name: dump_date
+        tests:
+          - not_null
+      - name: boarding_count
+        tests:
+          - not_null
+
+  - name: fact_afc_boarding
+    description: >
+      One row per boarding event, referencing its trip via trip_id
+      instead of repeating trip/line/vehicle/company columns per row.
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+      - name: trip_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_afc_trip')
+                field: trip_id
+      - name: boarding_at
+        tests:
+          - not_null
