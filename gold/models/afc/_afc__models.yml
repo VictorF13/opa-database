@@ -6,7 +6,9 @@ models:
       One row per real AFC trip instance. trip_id is a surrogate key
       (md5 hash of the full ancestor chain: service date, category,
       company, vehicle, line, trip timing/turnstiles), since the raw
-      feed has no single natural id for a trip.
+      feed has no single natural id for a trip. master_vehicle_id
+      resolves this trip's vehicle to the conformed identity in
+      dim_vehicle_master.
     columns:
       - name: trip_id
         tests:
@@ -15,6 +17,13 @@ models:
       - name: dump_date
         tests:
           - not_null
+      - name: master_vehicle_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_vehicle_master')
+                field: master_vehicle_id
       - name: boarding_count
         tests:
           - not_null
@@ -23,6 +32,8 @@ models:
     description: >
       One row per boarding event, referencing its trip via trip_id
       instead of repeating trip/line/vehicle/company columns per row.
+      Vehicle identity is reachable via trip_id -> dim_afc_trip ->
+      master_vehicle_id, not duplicated onto this table directly.
     columns:
       - name: event_id
         tests:

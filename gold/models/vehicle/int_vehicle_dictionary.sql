@@ -1,8 +1,15 @@
--- Crosswalk between AFC's vehicle identifier (cod_veiculo, matches
--- fact_afc_boarding's vehicle via dim_afc_trip.vehicle_number) and GPS's
--- vehicle identifier (id_veiculo, matches silver.avl_pings.vehicle_id),
--- from the latest ingested vehicle_dictionary snapshot only, not a union
--- of every historical snapshot.
+{{ config(materialized='ephemeral') }}
+
+-- Internal building block for dim_vehicle_master only, not meant for
+-- direct querying (hence "int_", not "dim_"): a plain crosswalk between
+-- AFC's vehicle identifier (cod_veiculo) and GPS's vehicle identifier
+-- (id_veiculo), from the latest ingested vehicle_dictionary snapshot
+-- only, not a union of every historical snapshot. It only covers
+-- vehicles present in the raw dictionary file; dim_vehicle_master is the
+-- complete picture (it also covers AFC-only and AVL-only vehicles that
+-- never appear here), so that's what anything downstream should use.
+-- Ephemeral rather than a table: nothing else references this, so there
+-- is no reason for it to exist as its own object in the database.
 --
 -- cod_veiculo is not a reliable unique key: buses get reassigned over
 -- time, so some codes map to more than one id_veiculo within the same
