@@ -2,9 +2,10 @@
 
 import click
 
-from opa_database.adapters import avl, gtfs
+from opa_database.adapters import afc, avl, gtfs
 
 _ADAPTERS = {
+    "afc": afc,
     "avl": avl,
     "gtfs": gtfs,
 }
