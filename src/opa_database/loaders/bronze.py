@@ -21,13 +21,16 @@ def write_bronze(
     """Write a DataFrame as a single bronze parquet file, Hive-partitioned on disk.
 
     Args:
-        df: Data to write, already validated against its source contract.
-        source: Top-level directory name under `bronze_root` (e.g. "avl").
-        partitions: Ordered partition key/value pairs (e.g. {"year": 2023,
-            "month": 11, "day": 1}), rendered as `key=value` path segments.
+        df (pl.DataFrame): Data to write, already validated against its
+            source contract.
+        source (str): Top-level directory name under `bronze_root` (e.g.
+            "avl").
+        partitions (Mapping[str, str | int]): Ordered partition key/value
+            pairs (e.g. {"year": 2023, "month": 11, "day": 1}), rendered
+            as `key=value` path segments.
 
     Returns:
-        The path the parquet file was written to.
+        Path: The path the parquet file was written to.
 
     """
     segments = [f"{key}={value}" for key, value in partitions.items()]

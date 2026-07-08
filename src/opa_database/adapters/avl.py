@@ -74,8 +74,12 @@ def ingest(year: int, month: int) -> list[Path]:
     (which would overwrite one another), the last date seen in each file is
     held back and merged with the next file before being written.
 
+    Args:
+        year (int): Calendar year to ingest.
+        month (int): Calendar month to ingest.
+
     Returns:
-        Paths of the bronze parquet files written.
+        list[Path]: Paths of the bronze parquet files written.
 
     """
     month_dir = _find_month_dir(year, month)

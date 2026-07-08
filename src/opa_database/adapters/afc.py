@@ -134,8 +134,12 @@ def ingest(year: int, month: int) -> list[Path]:
     day-pairs in November 2023), so each transaction is uploaded exactly
     once, just possibly late.
 
+    Args:
+        year (int): Calendar year to ingest.
+        month (int): Calendar month to ingest.
+
     Returns:
-        Paths of the bronze parquet files written.
+        list[Path]: Paths of the bronze parquet files written.
 
     """
     written: list[Path] = []
