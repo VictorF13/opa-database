@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: dim_vehicle
+    description: >
+      Crosswalk between AFC's vehicle identifier (cod_veiculo) and GPS's
+      vehicle identifier (id_veiculo), from the latest vehicle_dictionary
+      snapshot. Coverage is partial by nature of the source reference
+      data (not every AFC/GPS vehicle appears here), and that is expected,
+      not a data quality issue.
+    columns:
+      - name: cod_veiculo
+        tests:
+          - not_null
+      - name: id_veiculo
+        tests:
+          - not_null
+          - unique
+      - name: is_cod_veiculo_ambiguous
+        tests:
+          - not_null
