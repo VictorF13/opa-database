@@ -16,6 +16,8 @@ class Settings(BaseSettings):
         raw_data_root (Path): Path where the full raw data directory is located at.
         bronze_root (Path, optional): Path where the bronze layer parquets will be
             written to. Defaults to a local `./data/bronze`.
+        silver_dsn (str, optional): Connection string for the PostgreSQL+PostGIS
+            silver layer, provisioned via `docker compose up -d`.
 
     Raises:
         ValueError: If the `raw_data_root` passed or detected does not actually exist.
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
 
     raw_data_root: Path
     bronze_root: Path = Path("./data/bronze")
+    silver_dsn: str = "postgresql://opa:opa@localhost:5432/opa"
 
     @field_validator("raw_data_root")
     @classmethod
@@ -33,7 +36,12 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return v
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # extra="ignore": `.env` also carries SILVER_DB_USER/PASSWORD/NAME, read
+    # directly by `docker compose` for variable substitution rather than by
+    # this class (which only needs the composed `silver_dsn`).
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
 
 # I'm ignoring the missing argument here because it's auto-populated
