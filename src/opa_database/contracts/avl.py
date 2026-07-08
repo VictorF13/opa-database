@@ -7,7 +7,7 @@ files ship with no header row.
 """
 
 import pandera.polars as pa
-import polars as pl  # noqa: TC002 -- needed at runtime, pandera reads real dtypes off the annotations
+import polars as pl
 
 RAW_COLUMNS = [
     "direction",
