@@ -15,3 +15,34 @@ models:
       - name: geom
         tests:
           - not_null
+
+  - name: dim_gtfs_feed_version
+    description: >
+      One row per GTFS feed export, with the real-world calendar date
+      range (valid_from, valid_to) it was actually in effect for.
+      valid_to is null for the latest export, meaning still current.
+    columns:
+      - name: feed_version_date
+        tests:
+          - not_null
+          - unique
+      - name: valid_from
+        tests:
+          - not_null
+
+  - name: dim_gtfs_service_date
+    description: >
+      One row per (feed_version_date, service_id, calendar_date) the
+      service actually operated on: gtfs_calendar's weekly pattern
+      expanded into real dates, corrected by gtfs_calendar_dates'
+      exceptions.
+    columns:
+      - name: feed_version_date
+        tests:
+          - not_null
+      - name: service_id
+        tests:
+          - not_null
+      - name: calendar_date
+        tests:
+          - not_null
