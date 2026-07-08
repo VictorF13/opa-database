@@ -5,10 +5,12 @@ description = "Initial setup for OPA Database."
 readme = "README.md"
 authors = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
 maintainers = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     "click>=8.4.1",
+    "dbt-core>=1.11.12",
+    "dbt-postgres>=1.10.2",
     "pandera>=0.32.0",
     "polars>=1.41.2",
     "psycopg[binary]>=3.3",

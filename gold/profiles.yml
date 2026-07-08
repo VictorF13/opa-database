@@ -1,0 +1,12 @@
+opa_gold:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('SILVER_DB_HOST', 'localhost') }}"
+      port: 5432
+      user: "{{ env_var('SILVER_DB_USER', 'opa') }}"
+      password: "{{ env_var('SILVER_DB_PASSWORD', 'opa') }}"
+      dbname: "{{ env_var('SILVER_DB_NAME', 'opa') }}"
+      schema: gold
+      threads: 4

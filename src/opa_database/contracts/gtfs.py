@@ -13,7 +13,7 @@ crossing midnight, which don't round-trip through a time type.
 """
 
 import pandera.polars as pa
-import polars as pl  # noqa: TC002 -- needed at runtime, pandera reads real dtypes off the annotations
+import polars as pl
 
 
 class AgencySchema(pa.DataFrameModel):
