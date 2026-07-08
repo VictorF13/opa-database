@@ -2,12 +2,16 @@
 
 import click
 
-from opa_database.adapters import afc, avl, gtfs
+from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
 
 _ADAPTERS = {
     "afc": afc,
     "avl": avl,
     "gtfs": gtfs,
+}
+
+_REFERENCE_ADAPTERS = {
+    "vehicle_dictionary": vehicle_dictionary,
 }
 
 
@@ -26,3 +30,11 @@ def ingest(source: str, year: int, month: int) -> None:
     for path in written:
         click.echo(path)
     click.echo(f"Wrote {len(written)} bronze partition(s).")
+
+
+@cli.command("ingest-reference")
+@click.argument("source", type=click.Choice(sorted(_REFERENCE_ADAPTERS)))
+def ingest_reference(source: str) -> None:
+    """Snapshot a reference SOURCE into the bronze layer."""
+    path = _REFERENCE_ADAPTERS[source].ingest()
+    click.echo(path)
