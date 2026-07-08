@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from opa_database.config import settings
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     import polars as pl
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 def write_bronze(
     df: pl.DataFrame,
     source: str,
-    partitions: dict[str, str | int],
+    partitions: Mapping[str, str | int],
 ) -> Path:
     """Write a DataFrame as a single bronze parquet file, Hive-partitioned on disk.
 
