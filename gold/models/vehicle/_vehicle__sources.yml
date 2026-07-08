@@ -1,0 +1,12 @@
+version: 2
+
+sources:
+  - name: silver
+    schema: silver
+    tables:
+      - name: vehicle_dictionary
+        description: >
+          Snapshotted AFC-code (cod_veiculo) to GPS-id (id_veiculo)
+          vehicle mapping. cod_veiculo is not unique even within one
+          snapshot: buses get reassigned, so some codes map to more than
+          one id_veiculo. See silver/vehicle_dictionary.py.
