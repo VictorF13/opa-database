@@ -6,12 +6,15 @@ Viagem > Passageiro`, where each `Passageiro` is one boarding/fare event.
 This schema describes the flattened, one-row-per-`Passageiro` shape the
 adapter produces, carrying every ancestor's attributes down as columns.
 
-Each daily raw file is a resend batch, not just that day's data: it can
-contain `MovimentoDiario` entries (identified by `service_date`) going back
-weeks or months as the upstream system re-sends corrections. Bronze keeps
-that as-is — `service_date` is a plain column, not a partition key. See
-`adapters/afc.py` for the reasoning on why partitioning is by the dump
-file's date instead.
+Each daily raw file is a delayed-upload backlog, not just that day's data:
+validators without live connectivity buffer transactions locally and
+upload them whenever they reconnect, so a file can contain
+`MovimentoDiario` entries (identified by `service_date`) going back weeks
+or months. This isn't a resend/correction system — `event_id` is globally
+unique across dumps, so each transaction uploads exactly once, just
+possibly late. Bronze keeps this as-is — `service_date` is a plain column,
+not a partition key. See `adapters/afc.py` for the reasoning on why
+partitioning is by the dump file's date instead.
 
 ID-like fields (company_code, vehicle_number, validator_id, line_number,
 line_operator_number, event_id, card_id, stop codes) are kept as strings:
