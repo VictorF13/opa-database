@@ -13,5 +13,8 @@ wheels/
 # Environment variables
 .env
 
+# Local bronze/gold layer output
+data/
+
 # macOS
 .DS_Store
