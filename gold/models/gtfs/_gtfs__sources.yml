@@ -15,3 +15,14 @@ sources:
             description: GTFS shape identifier.
           - name: shape_pt_sequence
             description: Order of this point within its shape.
+      - name: gtfs_calendar
+        description: >
+          Weekly service patterns (day-of-week flags plus a validity date
+          range) per service_id, per feed_version_date. See
+          silver/gtfs.py.
+      - name: gtfs_calendar_dates
+        description: >
+          Exceptions to gtfs_calendar's weekly pattern for specific
+          dates: exception_type 1 adds service on a date the weekly
+          pattern wouldn't otherwise include, 2 removes it on a date the
+          pattern would otherwise include. See silver/gtfs.py.
