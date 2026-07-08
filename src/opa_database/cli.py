@@ -6,6 +6,7 @@ from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
 from opa_database.silver import afc as silver_afc
 from opa_database.silver import avl as silver_avl
 from opa_database.silver import gtfs as silver_gtfs
+from opa_database.silver import vehicle_dictionary as silver_vehicle_dictionary
 
 _ADAPTERS = {
     "afc": afc,
@@ -21,6 +22,10 @@ _SILVER_LOADERS = {
     "afc": silver_afc,
     "avl": silver_avl,
     "gtfs": silver_gtfs,
+}
+
+_SILVER_REFERENCE_LOADERS = {
+    "vehicle_dictionary": silver_vehicle_dictionary,
 }
 
 
@@ -57,3 +62,11 @@ def load_silver(source: str, year: int, month: int) -> None:
     """Load bronze SOURCE for a given year/month into the silver layer."""
     _SILVER_LOADERS[source].load(year, month)
     click.echo(f"Loaded silver.{source} for {year}-{month:02d}.")
+
+
+@cli.command("load-silver-reference")
+@click.argument("source", type=click.Choice(sorted(_SILVER_REFERENCE_LOADERS)))
+def load_silver_reference(source: str) -> None:
+    """Load the latest reference SOURCE snapshot into the silver layer."""
+    _SILVER_REFERENCE_LOADERS[source].load()
+    click.echo(f"Loaded silver.{source}.")
