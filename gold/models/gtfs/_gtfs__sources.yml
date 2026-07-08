@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: silver
+    schema: silver
+    tables:
+      - name: gtfs_shapes
+        description: >
+          GTFS shape points, one row per (feed_version_date, shape_id,
+          shape_pt_sequence). See silver/gtfs.py in the Python pipeline.
+        columns:
+          - name: feed_version_date
+            description: Date of the GTFS feed export this row belongs to.
+          - name: shape_id
+            description: GTFS shape identifier.
+          - name: shape_pt_sequence
+            description: Order of this point within its shape.
