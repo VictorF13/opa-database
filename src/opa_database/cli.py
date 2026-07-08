@@ -39,7 +39,14 @@ def cli() -> None:
 @click.option("--year", type=int, required=True)
 @click.option("--month", type=int, required=True)
 def ingest(source: str, year: int, month: int) -> None:
-    """Ingest a raw SOURCE for a given year/month into the bronze layer."""
+    """Ingest a raw SOURCE for a given year/month into the bronze layer.
+
+    Args:
+        source (str): Raw source to ingest (`avl`, `afc`, or `gtfs`).
+        year (int): Calendar year to ingest.
+        month (int): Calendar month to ingest.
+
+    """
     written = _ADAPTERS[source].ingest(year, month)
     for path in written:
         click.echo(path)
@@ -49,7 +56,12 @@ def ingest(source: str, year: int, month: int) -> None:
 @cli.command("ingest-reference")
 @click.argument("source", type=click.Choice(sorted(_REFERENCE_ADAPTERS)))
 def ingest_reference(source: str) -> None:
-    """Snapshot a reference SOURCE into the bronze layer."""
+    """Snapshot a reference SOURCE into the bronze layer.
+
+    Args:
+        source (str): Reference source to snapshot (`vehicle_dictionary`).
+
+    """
     path = _REFERENCE_ADAPTERS[source].ingest()
     click.echo(path)
 
@@ -59,7 +71,14 @@ def ingest_reference(source: str) -> None:
 @click.option("--year", type=int, required=True)
 @click.option("--month", type=int, required=True)
 def load_silver(source: str, year: int, month: int) -> None:
-    """Load bronze SOURCE for a given year/month into the silver layer."""
+    """Load bronze SOURCE for a given year/month into the silver layer.
+
+    Args:
+        source (str): Bronze source to load (`avl`, `afc`, or `gtfs`).
+        year (int): Calendar year to load.
+        month (int): Calendar month to load.
+
+    """
     _SILVER_LOADERS[source].load(year, month)
     click.echo(f"Loaded silver.{source} for {year}-{month:02d}.")
 
@@ -67,6 +86,11 @@ def load_silver(source: str, year: int, month: int) -> None:
 @cli.command("load-silver-reference")
 @click.argument("source", type=click.Choice(sorted(_SILVER_REFERENCE_LOADERS)))
 def load_silver_reference(source: str) -> None:
-    """Load the latest reference SOURCE snapshot into the silver layer."""
+    """Load the latest reference SOURCE snapshot into the silver layer.
+
+    Args:
+        source (str): Reference source to load (`vehicle_dictionary`).
+
+    """
     _SILVER_REFERENCE_LOADERS[source].load()
     click.echo(f"Loaded silver.{source}.")

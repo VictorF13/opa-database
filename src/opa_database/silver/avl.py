@@ -77,6 +77,11 @@ def load(year: int, month: int) -> None:
     `DADOS_GPS/GPS data fields.txt` dictionary's own "metrictimestamp
     (UTC-0)" label), so this is a relabeling to a proper `timestamptz`,
     not a shift.
+
+    Args:
+        year (int): Calendar year to load.
+        month (int): Calendar month to load.
+
     """
     glob = (
         settings.bronze_root
