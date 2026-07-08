@@ -16,5 +16,11 @@ wheels/
 # Local bronze/gold layer output
 data/
 
+# dbt-generated artifacts
+gold/target/
+gold/logs/
+gold/dbt_packages/
+gold/.user.yml
+
 # macOS
 .DS_Store

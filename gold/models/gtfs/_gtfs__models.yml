@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: dim_shape
+    description: >
+      One row per (feed_version_date, shape_id): GTFS shape points
+      aggregated into a single LineString, ordered by shape_pt_sequence.
+    columns:
+      - name: feed_version_date
+        tests:
+          - not_null
+      - name: shape_id
+        tests:
+          - not_null
+      - name: geom
+        tests:
+          - not_null
