@@ -26,3 +26,26 @@ sources:
           dates: exception_type 1 adds service on a date the weekly
           pattern wouldn't otherwise include, 2 removes it on a date the
           pattern would otherwise include. See silver/gtfs.py.
+      - name: gtfs_agency
+        description: Transit agencies operating the feed. See silver/gtfs.py.
+      - name: gtfs_routes
+        description: Routes. References agency_id. See silver/gtfs.py.
+      - name: gtfs_trips
+        description: >
+          Scheduled trips. References route_id, service_id, shape_id.
+          See silver/gtfs.py.
+      - name: gtfs_stops
+        description: >
+          Stop/station locations. parent_station self-references
+          stop_id for stops that belong to a larger station. See
+          silver/gtfs.py.
+      - name: gtfs_stop_times
+        description: >
+          Per-trip, per-stop scheduled arrival/departure. References
+          trip_id, stop_id. See silver/gtfs.py.
+      - name: gtfs_fare_attributes
+        description: Fare prices and transfer rules. See silver/gtfs.py.
+      - name: gtfs_fare_rules
+        description: >
+          Maps fares to routes/zones. References fare_id, optionally
+          route_id. See silver/gtfs.py.
