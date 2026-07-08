@@ -10,5 +10,12 @@ services:
     volumes:
       - opa_postgres_data:/var/lib/postgresql/data
 
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
 volumes:
   opa_postgres_data:
