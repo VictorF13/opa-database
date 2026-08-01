@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import IO
 
-_DUMP_FILE_NAME = re.compile(r"V(\d{4})(\d{2})(\d{2})\.zip$")
+_DUMP_FILE_NAME = re.compile(r"V(\d{4})(\d{2})(\d{2})t?\.zip$")
 
 # One column per (context tag, XML attribute), flattened onto every
 # Passageiro row. Order matches the nesting depth the value is read at.
@@ -69,9 +69,12 @@ _COLUMNS = tuple(name for *_, name in _CONTEXT_ATTRS) + tuple(
 def _find_dump_zips(year: int, month: int) -> list[Path]:
     """Locate raw AFC daily dump zips for a given year/month.
 
-    Only matches the "V{YYYYMMDD}.zip" naming convention used since 2020.
-    2014-2018 raw data uses a different format entirely (per-month folders
-    of "Viagenssigom{date}.csv" files) and isn't supported yet.
+    Only matches the "V{YYYYMMDD}.zip" naming convention used since 2020
+    (a trailing "t" before ".zip" is also tolerated: 16 dumps in May 2022
+    are named that way, e.g. "V20220513t.zip", the only month/year this
+    has been observed). 2014-2018 raw data uses a different format
+    entirely (per-month folders of "Viagenssigom{date}.csv" files) and
+    isn't supported yet.
     """
     year_dir = settings.raw_data_root / "DADOS_BILHETAGEM" / str(year)
     matches = [
