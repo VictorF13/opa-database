@@ -185,6 +185,14 @@ tests exist:
     `dim_gtfs_trip_route_exists.sql`: a `LEFT JOIN` on
     `(feed_version_date, route_id)` together, asserting no child row's FK
     is non-null while the matching parent is missing).
+    `dim_gtfs_stop_time_trip_exists.sql`/`_stop_exists.sql` join on
+    `coalesce(copied_from_feed_version_date, feed_version_date)` instead
+    of plain `feed_version_date`: a row whose whole `stop_times` table
+    was substituted from another export (see `architecture.md`'s GTFS
+    notes) carries that donor export's `trip_id`/`stop_id` namespace, not
+    its own nominal `feed_version_date`'s — joining on the row's own
+    `feed_version_date` would flag every substituted row as a
+    false-positive broken reference.
 
 ## Known gaps
 
