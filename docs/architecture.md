@@ -64,7 +64,19 @@ Source-specific notes worth knowing before touching an adapter:
   `stop_id`, etc.) sometimes carry meaningful leading zeros, so raw CSVs
   are read with `infer_schema_length=0` (every column as a string) before
   Pandera coerces each into its declared type; letting Polars infer types
-  itself would silently strip those zeros.
+  itself would silently strip those zeros. Five of the 72 canonical
+  exports are missing an entire raw table file inside their zip (four
+  missing `calendar_dates.txt`, one missing `stop_times.txt` — a verified
+  one-off data-quality issue, not an ongoing pattern). For just these two
+  tables, `ingest()` falls back to the nearest other export (by date,
+  ties preferring the earlier export) that actually has the file, and
+  tags every borrowed row with a non-null `copied_from_feed_version_date`
+  column holding that export's date; every other row of these two tables
+  carries `null`. Unlike this section's other raw-format quirks, this one
+  is deliberately *not* made fully invisible: the fact that data was
+  borrowed is preserved as a real column through silver and into gold
+  (`dim_gtfs_stop_time`, `dim_gtfs_service_date`), not swallowed at
+  bronze.
 - **Vehicle dictionary** (`adapters/vehicle_dictionary.py`): maps AFC's
   `cod_veiculo` to GPS's `id_veiculo`. `cod_veiculo` is not a reliable
   unique key even within one snapshot: buses get reassigned, so ~2% of

@@ -54,7 +54,8 @@ _TABLE_DDL: dict[str, LiteralString] = {
             feed_version_date date NOT NULL,
             service_id text NOT NULL,
             date date NOT NULL,
-            exception_type integer NOT NULL
+            exception_type integer NOT NULL,
+            copied_from_feed_version_date date
         );
     """,
     "fare_attributes": """
@@ -136,7 +137,8 @@ _TABLE_DDL: dict[str, LiteralString] = {
             stop_headsign text,
             pickup_type integer,
             drop_off_type integer,
-            shape_dist_traveled double precision
+            shape_dist_traveled double precision,
+            copied_from_feed_version_date date
         );
     """,
     "trips": """
@@ -299,7 +301,12 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
         "start_date",
         "end_date",
     ),
-    "calendar_dates": ("service_id", "date", "exception_type"),
+    "calendar_dates": (
+        "service_id",
+        "date",
+        "exception_type",
+        "copied_from_feed_version_date",
+    ),
     "fare_attributes": (
         "fare_id",
         "price",
@@ -351,6 +358,7 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
         "pickup_type",
         "drop_off_type",
         "shape_dist_traveled",
+        "copied_from_feed_version_date",
     ),
     "trips": (
         "route_id",
