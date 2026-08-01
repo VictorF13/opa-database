@@ -7,7 +7,12 @@ import datetime
 import polars as pl
 
 from opa_database.config import settings
-from opa_database.loaders.silver import get_connection, replace_period
+from opa_database.loaders.silver import (
+    IndexSpec,
+    get_connection,
+    monthly_partition_name,
+    replace_period,
+)
 
 _TABLE = "silver.afc_boardings"
 _DECEMBER = 12
@@ -28,7 +33,9 @@ _LOCAL_TIMESTAMP_COLUMNS = (
 # geom is GENERATED, not inserted directly (see silver/avl.py for the same
 # pattern): Postgres computes it from latitude/longitude on write. It's
 # null whenever either input is, matching bronze's ~14% missing rate.
-_TABLE_DDL = """
+# Partitioned by month, matching this loader's own whole-month load calls
+# (see loaders/silver.py::replace_period).
+_PARENT_DDL = """
 CREATE TABLE IF NOT EXISTS silver.afc_boardings (
     dump_date date NOT NULL,
     service_date date NOT NULL,
@@ -64,38 +71,30 @@ CREATE TABLE IF NOT EXISTS silver.afc_boardings (
     longitude double precision,
     geom geometry(Point, 4326)
         GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED
-);
+) PARTITION BY RANGE (dump_date);
 """
 
-# Dropped before and rebuilt after each load by replace_period() (see its
+# Created on each partition after it's bulk-loaded (see replace_period's
 # docstring). event_id is a UNIQUE index, not just a plain one: non-zero
-# event_ids are verified globally unique (zero overlap across all 435
-# day-pairs in November 2023), so this doubles as a data-integrity check —
-# a future violation would fail the load loudly instead of silently
-# duplicating. "0" is excluded (a partial index): it's a sentinel the raw
-# feed uses for passenger records with no real transaction reference (e.g.
-# fare-exempt boardings), not a real id, and it legitimately repeats
-# (~2% of rows in a sampled day).
+# event_ids were verified globally unique across the whole table (zero
+# overlap across all 435 day-pairs in November 2023) back when this was a
+# single unpartitioned table. Now that the index is per-partition
+# (per-month), it only enforces that within one month — a duplicate
+# event_id landing in two different months would no longer be caught.
+# Accepted tradeoff: Postgres has no native way to enforce true
+# cross-partition uniqueness on a non-partition-key column, and the
+# empirical finding backing this index still stands as evidence about the
+# real data, not just about the guardrail. "0" is excluded (a partial
+# index): it's a sentinel the raw feed uses for passenger records with no
+# real transaction reference (e.g. fare-exempt boardings), not a real id,
+# and it legitimately repeats (~2% of rows in a sampled day).
 _INDEXES = (
-    (
-        "afc_boardings_dump_date_idx",
-        "CREATE INDEX afc_boardings_dump_date_idx ON silver.afc_boardings (dump_date);",
+    IndexSpec("dump_date_idx", unique=False, definition="(dump_date)"),
+    IndexSpec("service_date_idx", unique=False, definition="(service_date)"),
+    IndexSpec(
+        "event_id_key", unique=True, definition="(event_id) WHERE event_id != '0'"
     ),
-    (
-        "afc_boardings_service_date_idx",
-        "CREATE INDEX afc_boardings_service_date_idx "
-        "ON silver.afc_boardings (service_date);",
-    ),
-    (
-        "afc_boardings_event_id_key",
-        "CREATE UNIQUE INDEX afc_boardings_event_id_key "
-        "ON silver.afc_boardings (event_id) WHERE event_id != '0';",
-    ),
-    (
-        "afc_boardings_geom_idx",
-        "CREATE INDEX afc_boardings_geom_idx "
-        "ON silver.afc_boardings USING GIST (geom);",
-    ),
+    IndexSpec("geom_idx", unique=False, definition="USING GIST (geom)"),
 )
 
 _COLUMNS = (
@@ -183,14 +182,15 @@ def load(year: int, month: int) -> None:
     )
 
     start, end = _period_bounds(year, month)
+    partition = monthly_partition_name("afc_boardings", year, month)
     with get_connection() as conn:
         replace_period(
             conn,
             _TABLE,
+            partition,
             df,
-            time_column="dump_date",
-            start=start,
-            end=end,
-            table_ddl=_TABLE_DDL,
+            partition_start=start,
+            partition_end=end,
+            parent_ddl=_PARENT_DDL,
             indexes=_INDEXES,
         )
