@@ -7,14 +7,21 @@ import datetime
 import polars as pl
 
 from opa_database.config import settings
-from opa_database.loaders.silver import get_connection, replace_period
+from opa_database.loaders.silver import (
+    IndexSpec,
+    get_connection,
+    monthly_partition_name,
+    replace_period,
+)
 
 _TABLE = "silver.avl_pings"
 
 # geom is GENERATED, not inserted directly: Postgres computes it from
 # latitude/longitude on write, so it doesn't need to travel through bronze
-# or be part of the COPY's column list.
-_TABLE_DDL = """
+# or be part of the COPY's column list. Partitioned by month: one
+# replace_period() call already loads exactly one month, so each call
+# maps to exactly one partition (see loaders/silver.py::replace_period).
+_PARENT_DDL = """
 CREATE TABLE IF NOT EXISTS silver.avl_pings (
     vehicle_id integer NOT NULL,
     device_id text NOT NULL,
@@ -27,20 +34,15 @@ CREATE TABLE IF NOT EXISTS silver.avl_pings (
     metric_timestamp timestamptz NOT NULL,
     geom geometry(Point, 4326)
         GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED
-);
+) PARTITION BY RANGE (metric_timestamp);
 """
 
-# Dropped before and rebuilt after each load by replace_period(), rather
-# than incrementally maintained per-row during COPY (see its docstring).
+# Created on each partition after it's bulk-loaded, rather than
+# incrementally maintained per-row during COPY (see replace_period's
+# docstring).
 _INDEXES = (
-    (
-        "avl_pings_geom_idx",
-        "CREATE INDEX avl_pings_geom_idx ON silver.avl_pings USING GIST (geom);",
-    ),
-    (
-        "avl_pings_ts_idx",
-        "CREATE INDEX avl_pings_ts_idx ON silver.avl_pings (metric_timestamp);",
-    ),
+    IndexSpec("geom_idx", unique=False, definition="USING GIST (geom)"),
+    IndexSpec("ts_idx", unique=False, definition="(metric_timestamp)"),
 )
 
 _DECEMBER = 12
@@ -99,14 +101,15 @@ def load(year: int, month: int) -> None:
     )
 
     start, end = _period_bounds(year, month)
+    partition = monthly_partition_name("avl_pings", year, month)
     with get_connection() as conn:
         replace_period(
             conn,
             _TABLE,
+            partition,
             df,
-            time_column="metric_timestamp",
-            start=start,
-            end=end,
-            table_ddl=_TABLE_DDL,
+            partition_start=start,
+            partition_end=end,
+            parent_ddl=_PARENT_DDL,
             indexes=_INDEXES,
         )

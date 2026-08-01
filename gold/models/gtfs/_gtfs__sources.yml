@@ -25,7 +25,10 @@ sources:
           Exceptions to gtfs_calendar's weekly pattern for specific
           dates: exception_type 1 adds service on a date the weekly
           pattern wouldn't otherwise include, 2 removes it on a date the
-          pattern would otherwise include. See silver/gtfs.py.
+          pattern would otherwise include. A few raw exports are missing
+          this file entirely; for those, copied_from_feed_version_date is
+          non-null and records which other export's data was substituted.
+          See silver/gtfs.py.
       - name: gtfs_agency
         description: Transit agencies operating the feed. See silver/gtfs.py.
       - name: gtfs_routes
@@ -42,7 +45,10 @@ sources:
       - name: gtfs_stop_times
         description: >
           Per-trip, per-stop scheduled arrival/departure. References
-          trip_id, stop_id. See silver/gtfs.py.
+          trip_id, stop_id. One raw export is missing this file entirely;
+          for that one, copied_from_feed_version_date is non-null and
+          records which other export's data was substituted. See
+          silver/gtfs.py.
       - name: gtfs_fare_attributes
         description: Fare prices and transfer rules. See silver/gtfs.py.
       - name: gtfs_fare_rules

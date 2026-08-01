@@ -35,7 +35,11 @@ models:
       One row per (feed_version_date, service_id, calendar_date) the
       service actually operated on: gtfs_calendar's weekly pattern
       expanded into real dates, corrected by gtfs_calendar_dates'
-      exceptions.
+      exceptions. copied_from_feed_version_date is non-null only for
+      dates added via a borrowed calendar_dates exception row (see
+      dim_gtfs_stop_time's column of the same name); it can't surface
+      the analogous case for an *excluded* date, since a borrowed
+      "removed" exception produces no row here to mark at all.
     columns:
       - name: feed_version_date
         tests:
@@ -46,6 +50,17 @@ models:
       - name: calendar_date
         tests:
           - not_null
+      - name: copied_from_feed_version_date
+        description: >
+          Non-null only when this date's inclusion is owed to a
+          calendar_dates "added" exception row that was itself borrowed
+          from another export (see docs/architecture.md); holds that
+          other export's feed_version_date. Null otherwise.
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_gtfs_feed_version')
+                field: feed_version_date
 
   - name: dim_gtfs_agency
     description: One row per transit agency, per feed export.
@@ -129,6 +144,17 @@ models:
       - name: stop_sequence
         tests:
           - not_null
+      - name: copied_from_feed_version_date
+        description: >
+          Non-null only when this export's own raw stop_times.txt was
+          missing and this row's data was borrowed from another export
+          (see docs/architecture.md); holds that other export's
+          feed_version_date. Null for every normally-sourced row.
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_gtfs_feed_version')
+                field: feed_version_date
 
   - name: dim_gtfs_fare
     description: One row per fare, per feed export.

@@ -139,7 +139,10 @@ needs to fall back to silver directly:
   trip can revisit the same stop (e.g. a loop route); it's the largest of
   these tables, so it has an index on `(feed_version_date, trip_id)`.
   `dim_gtfs_trip` is named to avoid confusion with `dim_afc_trip` (a real
-  observed vehicle run, not a GTFS schedule definition).
+  observed vehicle run, not a GTFS schedule definition). `dim_gtfs_stop_time`
+  also carries `copied_from_feed_version_date`, non-null for the one
+  export whose own `stop_times.txt` was missing and substituted from
+  another export (see `architecture.md`'s GTFS notes).
 - **`dim_shape`**: GTFS shape points aggregated into a single
   `LINESTRING` per `(feed_version_date, shape_id)` via
   `ST_MakeLine(geom ORDER BY shape_pt_sequence)`. Point-level granularity
@@ -158,7 +161,10 @@ needs to fall back to silver directly:
   `2` removes one). Precomputed once so nothing downstream has to redo the
   day-of-week/exception logic itself. Describes one feed snapshot's own
   calendar; pair with `dim_gtfs_feed_version` to know which snapshot
-  applied on a given real date.
+  applied on a given real date. Also carries
+  `copied_from_feed_version_date`, non-null for dates whose inclusion
+  came from a borrowed `calendar_dates` "added" exception row (see Known
+  gaps below for what this can't surface).
 
 ## Testing
 
@@ -179,6 +185,14 @@ tests exist:
     `dim_gtfs_trip_route_exists.sql`: a `LEFT JOIN` on
     `(feed_version_date, route_id)` together, asserting no child row's FK
     is non-null while the matching parent is missing).
+    `dim_gtfs_stop_time_trip_exists.sql`/`_stop_exists.sql` join on
+    `coalesce(copied_from_feed_version_date, feed_version_date)` instead
+    of plain `feed_version_date`: a row whose whole `stop_times` table
+    was substituted from another export (see `architecture.md`'s GTFS
+    notes) carries that donor export's `trip_id`/`stop_id` namespace, not
+    its own nominal `feed_version_date`'s — joining on the row's own
+    `feed_version_date` would flag every substituted row as a
+    false-positive broken reference.
 
 ## Known gaps
 
@@ -186,3 +200,11 @@ See the "Known gaps" section of [`architecture.md`](architecture.md). The
 gold-specific ones (no AFC+AVL+GTFS combined fact table, no enforced
 DDL-level constraints, no dbt run in CI) live there to avoid duplicating
 the list in two places.
+
+`dim_gtfs_service_date`'s grain (one row per operating day, not per
+`calendar_dates` source row) means `copied_from_feed_version_date` can
+only surface provenance for dates *included* via a borrowed "added"
+exception. It can't surface the analogous case for a date *excluded* by a
+borrowed "removed" exception, since an excluded date produces no row here
+to mark at all — full traceability for that case requires querying
+`silver.gtfs_calendar_dates` directly.

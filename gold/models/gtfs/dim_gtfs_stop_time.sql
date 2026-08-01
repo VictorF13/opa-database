@@ -17,5 +17,6 @@ select
     stop_headsign,
     pickup_type,
     drop_off_type,
-    shape_dist_traveled
+    shape_dist_traveled,
+    copied_from_feed_version_date
 from {{ source('silver', 'gtfs_stop_times') }}

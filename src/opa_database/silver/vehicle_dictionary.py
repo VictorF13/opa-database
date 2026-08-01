@@ -7,38 +7,38 @@ import datetime
 import polars as pl
 
 from opa_database.config import settings
-from opa_database.loaders.silver import get_connection, replace_period
+from opa_database.loaders.silver import (
+    IndexSpec,
+    daily_partition_name,
+    get_connection,
+    replace_period,
+)
 
 _TABLE = "silver.vehicle_dictionary"
 
-_TABLE_DDL = """
+# Partitioned by day, matching this loader's own single-snapshot load
+# calls (see loaders/silver.py::replace_period). Row counts here are tiny
+# (a few thousand per snapshot), so partitioning is about consistency
+# with the other silver tables rather than a real perf need.
+_PARENT_DDL = """
 CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary (
     snapshot_date date NOT NULL,
     cod_veiculo text NOT NULL,
     id_veiculo text NOT NULL
-);
+) PARTITION BY RANGE (snapshot_date);
 """
 
 # cod_veiculo is deliberately not unique, even within one snapshot: buses
 # get reassigned (~2% of codes map to more than one id_veiculo). id_veiculo
 # is unique within a snapshot, so it gets a real constraint as a
-# data-integrity safeguard, same reasoning as AFC's event_id.
+# data-integrity safeguard, same reasoning as AFC's event_id. Since each
+# partition already holds exactly one snapshot, this per-partition index
+# already covers the full "unique within a snapshot" guarantee — no
+# weakening versus the old unpartitioned version, unlike AFC's event_id.
 _INDEXES = (
-    (
-        "vehicle_dictionary_snapshot_date_idx",
-        "CREATE INDEX vehicle_dictionary_snapshot_date_idx "
-        "ON silver.vehicle_dictionary (snapshot_date);",
-    ),
-    (
-        "vehicle_dictionary_cod_veiculo_idx",
-        "CREATE INDEX vehicle_dictionary_cod_veiculo_idx "
-        "ON silver.vehicle_dictionary (cod_veiculo);",
-    ),
-    (
-        "vehicle_dictionary_snapshot_id_key",
-        "CREATE UNIQUE INDEX vehicle_dictionary_snapshot_id_key "
-        "ON silver.vehicle_dictionary (snapshot_date, id_veiculo);",
-    ),
+    IndexSpec("snapshot_date_idx", unique=False, definition="(snapshot_date)"),
+    IndexSpec("cod_veiculo_idx", unique=False, definition="(cod_veiculo)"),
+    IndexSpec("snapshot_id_key", unique=True, definition="(snapshot_date, id_veiculo)"),
 )
 
 _COLUMNS = ("cod_veiculo", "id_veiculo")
@@ -92,14 +92,15 @@ def load(snapshot_date: datetime.date | None = None) -> None:
         .collect()
     )
 
+    partition = daily_partition_name("vehicle_dictionary", date)
     with get_connection() as conn:
         replace_period(
             conn,
             _TABLE,
+            partition,
             df,
-            time_column="snapshot_date",
-            start=date,
-            end=date + datetime.timedelta(days=1),
-            table_ddl=_TABLE_DDL,
+            partition_start=date,
+            partition_end=date + datetime.timedelta(days=1),
+            parent_ddl=_PARENT_DDL,
             indexes=_INDEXES,
         )

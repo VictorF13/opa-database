@@ -1,9 +1,12 @@
 """Pandera schemas for the raw GTFS bronze source.
 
-One `DataFrameModel` per GTFS table (standard GTFS reference, no custom
-fields observed in this feed). `stops_unicode.txt` is deliberately excluded:
-it is a UTF-16 duplicate of `stops.txt` kept for legacy consumers, not a
-distinct table.
+One `DataFrameModel` per GTFS table, following the standard GTFS reference
+columns, plus one adapter-added field: `CalendarDatesSchema` and
+`StopTimesSchema` each carry a `copied_from_feed_version_date` column
+recording when that table's data was substituted from a different export
+(see those classes' docstrings and `docs/architecture.md`).
+`stops_unicode.txt` is deliberately excluded: it is a UTF-16 duplicate of
+`stops.txt` kept for legacy consumers, not a distinct table.
 
 All ID-like fields (route_id, stop_id, trip_id, shape_id, service_id,
 fare_id, block_id) are kept as strings since some carry meaningful leading
@@ -54,11 +57,18 @@ class CalendarSchema(pa.DataFrameModel):
 
 
 class CalendarDatesSchema(pa.DataFrameModel):
-    """`calendar_dates.txt`: exceptions to the base weekly service patterns."""
+    """`calendar_dates.txt`: exceptions to the base weekly service patterns.
+
+    A handful of raw exports are missing this file entirely; for those,
+    `adapters/gtfs.py` substitutes the nearest other export's data and
+    stamps `copied_from_feed_version_date` with that export's date (see
+    `docs/architecture.md`). Null for every normally-sourced row.
+    """
 
     service_id: str
     date: pl.Date
     exception_type: int
+    copied_from_feed_version_date: pl.Date = pa.Field(nullable=True)
 
     class Config:
         """Coerce raw CSV columns into their target dtypes."""
@@ -154,7 +164,13 @@ class StopsSchema(pa.DataFrameModel):
 
 
 class StopTimesSchema(pa.DataFrameModel):
-    """`stop_times.txt`: per-trip, per-stop arrival/departure times."""
+    """`stop_times.txt`: per-trip, per-stop arrival/departure times.
+
+    One raw export is missing this file entirely; for that one,
+    `adapters/gtfs.py` substitutes the nearest other export's data and
+    stamps `copied_from_feed_version_date` with that export's date (see
+    `docs/architecture.md`). Null for every normally-sourced row.
+    """
 
     trip_id: str
     arrival_time: str = pa.Field(nullable=True)
@@ -165,6 +181,7 @@ class StopTimesSchema(pa.DataFrameModel):
     pickup_type: int = pa.Field(nullable=True)
     drop_off_type: int = pa.Field(nullable=True)
     shape_dist_traveled: float = pa.Field(nullable=True)
+    copied_from_feed_version_date: pl.Date = pa.Field(nullable=True)
 
     class Config:
         """Coerce raw CSV columns into their target dtypes."""

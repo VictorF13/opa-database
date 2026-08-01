@@ -64,7 +64,19 @@ Source-specific notes worth knowing before touching an adapter:
   `stop_id`, etc.) sometimes carry meaningful leading zeros, so raw CSVs
   are read with `infer_schema_length=0` (every column as a string) before
   Pandera coerces each into its declared type; letting Polars infer types
-  itself would silently strip those zeros.
+  itself would silently strip those zeros. Five of the 72 canonical
+  exports are missing an entire raw table file inside their zip (four
+  missing `calendar_dates.txt`, one missing `stop_times.txt` — a verified
+  one-off data-quality issue, not an ongoing pattern). For just these two
+  tables, `ingest()` falls back to the nearest other export (by date,
+  ties preferring the earlier export) that actually has the file, and
+  tags every borrowed row with a non-null `copied_from_feed_version_date`
+  column holding that export's date; every other row of these two tables
+  carries `null`. Unlike this section's other raw-format quirks, this one
+  is deliberately *not* made fully invisible: the fact that data was
+  borrowed is preserved as a real column through silver and into gold
+  (`dim_gtfs_stop_time`, `dim_gtfs_service_date`), not swallowed at
+  bronze.
 - **Vehicle dictionary** (`adapters/vehicle_dictionary.py`): maps AFC's
   `cod_veiculo` to GPS's `id_veiculo`. `cod_veiculo` is not a reliable
   unique key even within one snapshot: buses get reassigned, so ~2% of
@@ -78,23 +90,30 @@ Location: `src/opa_database/silver/`, `src/opa_database/loaders/silver.py`.
 Backing store: PostgreSQL 16 + PostGIS 3.4 (`docker-compose.yml`), schema
 `silver`.
 
-Every silver loader follows the same **idempotent "replace a period"**
-pattern, implemented once in `loaders/silver.py::replace_period`:
+Every silver table is a native Postgres `PARTITION BY RANGE` parent, one
+partition per load period (monthly for AVL/AFC, daily for GTFS/vehicle
+dictionary — matching each source's own load granularity exactly). Every
+silver loader follows the same **idempotent "replace a period"** pattern,
+implemented once in `loaders/silver.py::replace_period`:
 
-1. Bootstrap the table (`CREATE TABLE IF NOT EXISTS`) if it doesn't exist.
-2. Inside one transaction: drop the table's indexes, `DELETE` any existing
-   rows in `[start, end)` of the period being loaded, bulk-load the new
+1. Bootstrap the parent table (`CREATE TABLE IF NOT EXISTS ... PARTITION
+   BY RANGE (...)`) if it doesn't exist.
+2. Inside one transaction: `DROP TABLE IF EXISTS` the target partition
+   (if this period was already loaded — this removes its rows *and* its
+   indexes in one metadata operation), `CREATE TABLE ... PARTITION OF
+   ... FOR VALUES FROM (...) TO (...)` a fresh one, bulk-load the new
    data via `COPY` (a single vectorized CSV write, not a Python
-   per-row loop), then recreate the indexes.
+   per-row loop), then create that partition's indexes.
 
-Indexes are dropped and rebuilt in bulk rather than maintained
+Indexes are created after the bulk load rather than maintained
 incrementally during the `COPY`, since incremental index maintenance
 (especially the GiST spatial index) is dramatically slower than one batch
-rebuild for a multi-million-row load; this is Postgres's own documented
-recommendation. The tradeoff: every load rebuilds indexes for the *whole*
-table, not just the period changed, so cost scales with total table size.
-Fine for the current handful of months of history; worth revisiting (e.g.
-native monthly partitioning) if it stops being fine.
+build for a multi-million-row load; this is Postgres's own documented
+recommendation. Scoping the drop/rebuild to a single partition (rather
+than the whole table, as an earlier version of this design did) means
+that cost scales with one period's size, not the table's total
+accumulated history — reloading any one month/day costs the same
+regardless of how many other months/days already exist.
 
 This makes "reload November" a safe, repeatable operation: run it twice
 and you get the same rows, not duplicates.
@@ -103,6 +122,17 @@ Each silver table's period key matches its bronze partition key
 (`metric_timestamp` bucket for AVL, `dump_date` for AFC, `feed_version_date`
 for GTFS, `snapshot_date` for the vehicle dictionary): silver reprocesses
 "the same period bronze uses," not a recomputed one.
+
+One accepted tradeoff from partitioning: AFC's `event_id` unique index
+used to guarantee uniqueness across the table's entire history (a single
+unpartitioned index); it's now per-partition (per-month), so it only
+catches a duplicate within the same month. A duplicate `event_id` landing
+in two different months would no longer be caught automatically. Postgres
+has no native way to enforce true cross-partition uniqueness on a
+non-partition-key column; the empirical finding backing this index (zero
+overlap across all 435 day-pairs in November 2023) still stands as
+evidence about the real data, this only weakens the automatic safety net
+for a hypothetical future violation.
 
 Silver stays **flat and per-source on purpose**. For example,
 `silver.afc_boardings` repeats every trip/line/vehicle/company attribute on
