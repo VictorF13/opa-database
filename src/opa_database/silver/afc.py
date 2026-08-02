@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS silver.afc_boardings (
     company_modality integer NOT NULL,
     category_type integer NOT NULL,
     vehicle_number text NOT NULL,
-    validator_id text NOT NULL,
+    validator_id text,
     line_number text NOT NULL,
     line_shift integer NOT NULL,
     line_operator_number text NOT NULL,

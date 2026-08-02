@@ -38,7 +38,10 @@ class AfcSchema(pa.DataFrameModel):
     category_type: int
 
     vehicle_number: str
-    validator_id: str
+    # Nullable: a couple of dumps (e.g. 2021-01-10/11) have this attribute
+    # blank for most rows, a real gap in the raw feed rather than a
+    # parsing bug -- the rest of the row is still usable.
+    validator_id: str = pa.Field(nullable=True)
 
     line_number: str
     line_shift: int
