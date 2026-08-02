@@ -15,6 +15,11 @@ if TYPE_CHECKING:
     import datetime
     from pathlib import Path
 
+# 2018 is the one legacy year with a fundamentally different raw layout
+# (see `_find_2018_file`/`ingest`): a whole-month file with a header,
+# instead of one headerless file per day under a Portuguese-month folder.
+_LEGACY_WHOLE_MONTH_YEAR = 2018
+
 _PORTUGUESE_MONTHS = {
     1: "JANEIRO",
     2: "FEVEREIRO",
@@ -74,6 +79,20 @@ def _find_month_dir(year: int, month: int) -> Path:
     return matches[0]
 
 
+def _find_2018_file(month: int) -> Path:
+    """Locate the single raw AVL file for 2018's one-file-per-month layout.
+
+    Unlike every other year, 2018 has no month subfolders: all 12 months
+    sit directly under DADOS_GPS/2018/ as `Paint{MM}2018.csv`, one whole
+    month per file instead of one file per day.
+    """
+    path = settings.raw_data_root / "DADOS_GPS" / "2018" / f"Paint{month:02d}2018.csv"
+    if not path.exists():
+        msg = f"No AVL file found for 2018-{month:02d} at {path}"
+        raise FileNotFoundError(msg)
+    return path
+
+
 # Every raw column except latitude/longitude is required (AvlSchema has no
 # other nullable fields). A handful of rows across the raw history are
 # individually truncated/corrupted (e.g. a write cut short mid-line),
@@ -83,7 +102,7 @@ def _find_month_dir(year: int, month: int) -> Path:
 _REQUIRED_COLUMNS = [c for c in RAW_COLUMNS if c not in ("latitude", "longitude")]
 
 
-def _read_raw_csv(path: Path) -> pl.DataFrame:
+def _read_raw_csv(path: Path, *, has_header: bool = False) -> pl.DataFrame:
     # infer_schema_length=0 reads every column as a raw string first (same
     # reasoning as adapters/gtfs.py): letting Polars guess types from a
     # sample of early rows is fragile for a headerless file -- a malformed
@@ -91,8 +110,12 @@ def _read_raw_csv(path: Path) -> pl.DataFrame:
     # then crash later on a perfectly normal value in a column it
     # mis-inferred as numeric. Pandera's coerce=True (AvlSchema) casts each
     # column from the raw string into its declared dtype afterward.
+    # has_header=True (2018 only) still uses new_columns to rename, which
+    # simply discards whatever header row is present -- 2018's own header
+    # names differ (no underscores) but its column order already matches
+    # RAW_COLUMNS, so no explicit mapping is needed.
     df = pl.read_csv(
-        path, has_header=False, new_columns=RAW_COLUMNS, infer_schema_length=0
+        path, has_header=has_header, new_columns=RAW_COLUMNS, infer_schema_length=0
     )
     timestamp = pl.col("metric_timestamp").str.strptime(
         pl.Datetime, "%Y%m%d%H%M%S", strict=False
@@ -131,6 +154,13 @@ def ingest(year: int, month: int) -> list[Path]:
     lines scattered across the raw history, e.g. one row in
     2022-11-04's file) are dropped rather than failing the whole load.
 
+    2018 is the one exception to "one raw file per day": its whole year
+    lives as 12 already-monthly files (`Paint{MM}2018.csv`) directly under
+    DADOS_GPS/2018/, each with a header row unlike every other year. The
+    per-date write loop below already handles a file spanning many
+    calendar dates (it doesn't assume one date per file), so no other
+    ingest logic changes for this case.
+
     Args:
         year (int): Calendar year to ingest.
         month (int): Calendar month to ingest.
@@ -139,18 +169,24 @@ def ingest(year: int, month: int) -> list[Path]:
         list[Path]: Paths of the bronze parquet files written.
 
     """
-    month_dir = _find_month_dir(year, month)
+    if year == _LEGACY_WHOLE_MONTH_YEAR:
+        csv_paths = [_find_2018_file(month)]
+        has_header = True
+    else:
+        csv_paths = sorted(_find_month_dir(year, month).glob("*.csv"))
+        has_header = False
+
     written: list[Path] = []
     carry: pl.DataFrame | None = None
 
-    for csv_path in sorted(month_dir.glob("*.csv")):
+    for csv_path in csv_paths:
         if csv_path.stat().st_size == 0:
             # A handful of raw files are present but genuinely empty (e.g.
             # 2022-01-13) rather than absent. Treat that identically to a
             # missing day -- a real, if unusual, gap -- instead of letting
             # Polars raise on the empty read.
             continue
-        df = AvlSchema.validate(_read_raw_csv(csv_path))
+        df = AvlSchema.validate(_read_raw_csv(csv_path, has_header=has_header))
         if carry is not None:
             df = pl.concat([carry, df])
 
