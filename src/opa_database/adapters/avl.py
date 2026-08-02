@@ -74,11 +74,41 @@ def _find_month_dir(year: int, month: int) -> Path:
     return matches[0]
 
 
+# Every raw column except latitude/longitude is required (AvlSchema has no
+# other nullable fields). A handful of rows across the raw history are
+# individually truncated/corrupted (e.g. a write cut short mid-line),
+# landing a null in one of these -- vanishingly rare (1-2 rows out of
+# millions per occurrence) but enough to hit occasionally across years of
+# continuous logging.
+_REQUIRED_COLUMNS = [c for c in RAW_COLUMNS if c not in ("latitude", "longitude")]
+
+
 def _read_raw_csv(path: Path) -> pl.DataFrame:
-    df = pl.read_csv(path, has_header=False, new_columns=RAW_COLUMNS)
-    timestamp = pl.col("metric_timestamp").cast(pl.Utf8)
-    timestamp = timestamp.str.strptime(pl.Datetime, "%Y%m%d%H%M%S")
-    return df.with_columns(timestamp)
+    # infer_schema_length=0 reads every column as a raw string first (same
+    # reasoning as adapters/gtfs.py): letting Polars guess types from a
+    # sample of early rows is fragile for a headerless file -- a malformed
+    # row anywhere earlier in the file can shift its column-type guess,
+    # then crash later on a perfectly normal value in a column it
+    # mis-inferred as numeric. Pandera's coerce=True (AvlSchema) casts each
+    # column from the raw string into its declared dtype afterward.
+    df = pl.read_csv(
+        path, has_header=False, new_columns=RAW_COLUMNS, infer_schema_length=0
+    )
+    timestamp = pl.col("metric_timestamp").str.strptime(
+        pl.Datetime, "%Y%m%d%H%M%S", strict=False
+    )
+    df = df.with_columns(timestamp)
+    # Drop individually-corrupted rows (a null or empty value in a
+    # required field -- reading everything as string first means a
+    # missing value can show up as "" rather than a true null) rather
+    # than letting the whole day's/month's ingest fail on a handful of
+    # unusable rows out of millions.
+    required_ok = pl.all_horizontal(
+        pl.col(c).is_not_null() & (pl.col(c) != "")
+        for c in _REQUIRED_COLUMNS
+        if c != "metric_timestamp"
+    )
+    return df.filter(required_ok & pl.col("metric_timestamp").is_not_null())
 
 
 def _write_day(df: pl.DataFrame, date: datetime.date) -> Path:
@@ -96,7 +126,10 @@ def ingest(year: int, month: int) -> list[Path]:
     held back and merged with the next file before being written.
 
     A raw file that exists but is empty (e.g. 2022-01-13) is skipped and
-    treated the same as a missing day, rather than raising.
+    treated the same as a missing day, rather than raising. Individual
+    rows with a null in a required field (a handful of truncated/corrupted
+    lines scattered across the raw history, e.g. one row in
+    2022-11-04's file) are dropped rather than failing the whole load.
 
     Args:
         year (int): Calendar year to ingest.
