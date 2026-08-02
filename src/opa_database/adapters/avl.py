@@ -43,14 +43,35 @@ def _find_month_dir(year: int, month: int) -> Path:
     Folder names are inconsistent across years and even within 2023 (e.g.
     "NOVEMBRO-2023", "ABRIL - 2023", "JULHO - 2023 -"), so this matches on
     the normalized Portuguese month name rather than the literal string.
+
+    Raises on more than one match rather than silently picking one: 2022's
+    raw data has both "MAIO 2022" (31 files, the real month) and a stray
+    "MAIO - 2022" (a single, duplicate day-1 file left over from an
+    abandoned copy) both normalizing to MAIO. Picking whichever directory
+    iteration happens to see first would be non-deterministic and could
+    silently ingest the wrong (incomplete) one, exactly what happened
+    here before this check existed.
     """
     year_dir = settings.raw_data_root / "DADOS_GPS" / str(year)
     target = _PORTUGUESE_MONTHS[month]
-    for entry in year_dir.iterdir():
-        if entry.is_dir() and _normalize(entry.name) == target:
-            return entry
-    msg = f"No AVL folder found for {year}-{month:02d} under {year_dir}"
-    raise FileNotFoundError(msg)
+    matches = [
+        entry
+        for entry in year_dir.iterdir()
+        if entry.is_dir() and _normalize(entry.name) == target
+    ]
+    if not matches:
+        msg = f"No AVL folder found for {year}-{month:02d} under {year_dir}"
+        raise FileNotFoundError(msg)
+    if len(matches) > 1:
+        names = ", ".join(sorted(m.name for m in matches))
+        msg = (
+            f"Multiple AVL folders found for {year}-{month:02d} under "
+            f"{year_dir}: {names}. Resolve the collision manually before "
+            "ingesting (e.g. confirm which is authoritative and remove or "
+            "rename the other)."
+        )
+        raise ValueError(msg)
+    return matches[0]
 
 
 def _read_raw_csv(path: Path) -> pl.DataFrame:
