@@ -74,6 +74,9 @@ def ingest(year: int, month: int) -> list[Path]:
     (which would overwrite one another), the last date seen in each file is
     held back and merged with the next file before being written.
 
+    A raw file that exists but is empty (e.g. 2022-01-13) is skipped and
+    treated the same as a missing day, rather than raising.
+
     Args:
         year (int): Calendar year to ingest.
         month (int): Calendar month to ingest.
@@ -87,6 +90,12 @@ def ingest(year: int, month: int) -> list[Path]:
     carry: pl.DataFrame | None = None
 
     for csv_path in sorted(month_dir.glob("*.csv")):
+        if csv_path.stat().st_size == 0:
+            # A handful of raw files are present but genuinely empty (e.g.
+            # 2022-01-13) rather than absent. Treat that identically to a
+            # missing day -- a real, if unusual, gap -- instead of letting
+            # Polars raise on the empty read.
+            continue
         df = AvlSchema.validate(_read_raw_csv(csv_path))
         if carry is not None:
             df = pl.concat([carry, df])
