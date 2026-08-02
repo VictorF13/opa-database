@@ -18,7 +18,49 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-_EXPORT_NAME = re.compile(r"exportacao_(\d{4})-(\d{2})-(\d{2})\.zip$")
+# GTFS export filenames use several distinct historical naming schemes.
+# Each entry pairs a pattern with the (year, month, day) index into that
+# pattern's match groups, since schemes differ in both separator and
+# day/month/year ordering.
+_EXPORT_NAME_PATTERNS: tuple[tuple[re.Pattern[str], tuple[int, int, int]], ...] = (
+    # 2020+: exportacao_YYYY-MM-DD.zip
+    (re.compile(r"exportacao_(\d{4})-(\d{2})-(\d{2})\.zip$"), (0, 1, 2)),
+    # 2015-2018 (most legacy exports): exportacaoDDMMYYYY.zip, sometimes
+    # with a stray space before the date (e.g. "exportacao 25052018.zip")
+    (re.compile(r"exportacao ?(\d{2})(\d{2})(\d{4})\.zip$"), (2, 1, 0)),
+    # 2019 (roughly a third of that year's exports): exportacao_DD-MM-YYYY.zip
+    (re.compile(r"exportacao_(\d{2})-(\d{2})-(\d{4})\.zip$"), (2, 1, 0)),
+)
+
+# One raw filename has a data-entry typo in the year ("2818" instead of
+# "2018" -- the file lives in the 2018/ folder and its zip content is
+# otherwise unremarkable), corrected explicitly rather than trusted as-is.
+_FILENAME_YEAR_CORRECTIONS: dict[str, int] = {"exportacao 05072818.zip": 2018}
+
+
+def _match_export_name(name: str) -> tuple[int, int, int] | None:
+    """Parse (year, month, day) from a GTFS export filename.
+
+    Tries every entry in `_EXPORT_NAME_PATTERNS` in turn, since export
+    filenames aren't consistent across the raw archive's history.
+
+    Args:
+        name (str): Filename to parse (e.g. "exportacao_2022-01-15.zip").
+
+    Returns:
+        tuple[int, int, int] | None: `(year, month, day)` if `name`
+            matches a known pattern, else `None`.
+
+    """
+    for pattern, (year_idx, month_idx, day_idx) in _EXPORT_NAME_PATTERNS:
+        match = pattern.match(name)
+        if match is None:
+            continue
+        groups = match.groups()
+        year = _FILENAME_YEAR_CORRECTIONS.get(name, int(groups[year_idx]))
+        return year, int(groups[month_idx]), int(groups[day_idx])
+    return None
+
 
 # Tables where a missing raw file is tolerated: `ingest` substitutes the
 # nearest other export's data instead of failing (see `_read_table_for_export`
@@ -28,7 +70,7 @@ _SUBSTITUTABLE_TABLES = frozenset({"calendar_dates", "stop_times"})
 
 
 def _all_export_zips() -> list[Path]:
-    """List every canonical-format GTFS export zip across all years.
+    """List every GTFS export zip across all years, any known naming scheme.
 
     Unlike `_find_export_zips` (scoped to one year/month), this scans
     every year directory, so it can be used to search for a substitute
@@ -39,34 +81,32 @@ def _all_export_zips() -> list[Path]:
         path
         for year_dir in root.iterdir()
         if year_dir.is_dir()
-        for path in year_dir.glob("exportacao_*.zip")
-        if _EXPORT_NAME.match(path.name)
+        for path in year_dir.glob("exportacao*.zip")
+        if _match_export_name(path.name) is not None
     )
 
 
 def _find_export_zips(year: int, month: int) -> list[Path]:
     """Locate GTFS export zips for a given year/month.
 
-    Only matches the "exportacao_YYYY-MM-DD.zip" naming convention used
-    since 2020. Earlier exports use several inconsistent naming schemes
-    (e.g. "exportacao02102015.zip", "exportacao_02-08-2019.zip") and aren't
-    supported yet.
+    Matches any of `_EXPORT_NAME_PATTERNS` (the 2020+ convention plus the
+    2015-2019 legacy naming schemes).
     """
     return [
         path
         for path in _all_export_zips()
-        if (match := _EXPORT_NAME.match(path.name))
-        and int(match.group(1)) == year
-        and int(match.group(2)) == month
+        if (parsed := _match_export_name(path.name))
+        and parsed[0] == year
+        and parsed[1] == month
     ]
 
 
 def _export_date(path: Path) -> datetime.date:
-    match = _EXPORT_NAME.match(path.name)
-    if match is None:
+    parsed = _match_export_name(path.name)
+    if parsed is None:
         msg = f"Unrecognized GTFS export filename: {path.name}"
         raise ValueError(msg)
-    year, month, day = (int(part) for part in match.groups())
+    year, month, day = parsed
     return datetime.date(year, month, day)
 
 
