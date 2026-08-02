@@ -59,16 +59,21 @@ Source-specific notes worth knowing before touching an adapter:
   clearing elements as it goes to keep memory bounded on ~15M rows/month.
   Only the `V{YYYYMMDD}.zip` filename convention (used since 2020) is
   supported; pre-2020 formats are out of scope for now.
-- **GTFS** (`adapters/gtfs.py`): only the `exportacao_YYYY-MM-DD.zip`
-  naming convention (used since 2020) is supported. GTFS ids (`route_id`,
-  `stop_id`, etc.) sometimes carry meaningful leading zeros, so raw CSVs
-  are read with `infer_schema_length=0` (every column as a string) before
-  Pandera coerces each into its declared type; letting Polars infer types
-  itself would silently strip those zeros. Five of the 72 canonical
-  exports are missing an entire raw table file inside their zip (four
-  missing `calendar_dates.txt`, one missing `stop_times.txt` — a verified
-  one-off data-quality issue, not an ongoing pattern). For just these two
-  tables, `ingest()` falls back to the nearest other export (by date,
+- **GTFS** (`adapters/gtfs.py`): the `exportacao_YYYY-MM-DD.zip` naming
+  convention (used since 2020, 72 canonical exports) plus three 2015-2019
+  legacy naming schemes (`exportacaoDDMMYYYY.zip`, an optional stray space
+  before the date, and `exportacao_DD-MM-YYYY.zip`) are all supported —
+  `_EXPORT_NAME_PATTERNS` tries each in turn. One legacy filename has a
+  data-entry typo in the year (`2818` for `2018`), corrected explicitly via
+  `_FILENAME_YEAR_CORRECTIONS`. GTFS ids (`route_id`, `stop_id`, etc.)
+  sometimes carry meaningful leading zeros, so raw CSVs are read with
+  `infer_schema_length=0` (every column as a string) before Pandera
+  coerces each into its declared type; letting Polars infer types itself
+  would silently strip those zeros. A handful of exports (five of the 72
+  canonical ones, plus several legacy ones) are missing an entire raw
+  table file inside their zip (`calendar_dates.txt` or `stop_times.txt` —
+  a verified one-off data-quality issue, not an ongoing pattern). For just
+  these two tables, `ingest()` falls back to the nearest other export (by date,
   ties preferring the earlier export) that actually has the file, and
   tags every borrowed row with a non-null `copied_from_feed_version_date`
   column holding that export's date; every other row of these two tables
