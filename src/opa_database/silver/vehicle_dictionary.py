@@ -11,7 +11,7 @@ carry a `dictionary_` prefix instead (`dictionary_vehicle`,
 alphabetically the same way `avl_*`/`afc_*`/`gtfs_*` do. Every one of
 them is kept as its own silver table rather than merged into
 `silver.dictionary_vehicle`, same reasoning as bronze: none of these
-files' id spaces are confirmed compatible with the live file's.
+files' id spaces are confirmed compatible with `dictionary_vehicle`'s.
 
 Every table here follows the same shape: partitioned by day (matching
 each loader's own single-snapshot load calls, see
@@ -227,7 +227,7 @@ def _load_snapshot(
     return table
 
 
-def load(snapshot_date: datetime.date | None = None) -> str:
+def load_vehicle(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary bronze snapshot into the silver layer.
 
     Defaults to the most recent bronze snapshot available. Keyed by its

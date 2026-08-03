@@ -20,7 +20,7 @@ _ADAPTERS = {
 # (see its docstring for why); the CLI just needs a source-name ->
 # ingest-function mapping, not a source-name -> module mapping.
 _REFERENCE_ADAPTERS = {
-    "vehicle_dictionary": vehicle_dictionary.ingest,
+    "vehicle_dictionary": vehicle_dictionary.ingest_vehicle,
     "device_dictionary": vehicle_dictionary.ingest_device_dictionary,
     "vehicle_dictionary_legacy": vehicle_dictionary.ingest_legacy,
     "vehicle_dictionary_legacy2": vehicle_dictionary.ingest_legacy2,
@@ -38,7 +38,7 @@ _SILVER_LOADERS = {
 # (see its docstring for why); the CLI just needs a source-name ->
 # load-function mapping, not a source-name -> module mapping.
 _SILVER_REFERENCE_LOADERS = {
-    "vehicle_dictionary": silver_vehicle_dictionary.load,
+    "vehicle_dictionary": silver_vehicle_dictionary.load_vehicle,
     "device_dictionary": silver_vehicle_dictionary.load_device_dictionary,
     "vehicle_dictionary_legacy": silver_vehicle_dictionary.load_legacy,
     "vehicle_dictionary_legacy2": silver_vehicle_dictionary.load_legacy2,
