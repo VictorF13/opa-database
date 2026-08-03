@@ -1,16 +1,17 @@
 """Pandera schemas for the vehicle dictionary family of bronze sources.
 
-`DICIONÁRIO_VEÍCULOS/` on the raw data root holds several independently
-extracted vehicle-identity crosswalks, not just the one currently live
-file. All four schemas below live in this one module, same as how
+`DICIONÁRIO_VEÍCULOS/` on the raw data root held several independently
+extracted vehicle-identity crosswalks, all now fully captured in bronze
+(see `adapters/vehicle_dictionary.py` for why the raw files themselves
+are gone). All four schemas below live in this one module, same as how
 `contracts/avl.py` is one schema shared across AVL's several raw layouts
 -- except here the raw *shapes* differ too, so each gets its own model
 rather than a shared one:
 
-- `VehicleDictionarySchema` (`cod_veiculo`/`id_veiculo`): the live,
-  currently-maintained mapping (`veiculos_atuais.csv`), plus two older
-  snapshots that happen to share this exact shape (`veiculos2018.csv`,
-  `veiculos_antigo.csv`). `id_veiculo` matches AVL's `vehicle_id` int.
+- `VehicleDictionarySchema` (`cod_veiculo`/`id_veiculo`): the original
+  mapping (`veiculos_atuais.csv`), plus two older snapshots that happen
+  to share this exact shape (`veiculos2018.csv`, `veiculos_antigo.csv`).
+  `id_veiculo` matches AVL's `vehicle_id` int.
 - `VehicleDictionaryLegacySchema` (`vehicleid`/`numbus`,
   `dicionario_veiculos.csv`) and `VehicleDictionaryLegacy2Schema`
   (`id`/`carro`/`obs1`/`obs2`, `dicionario_veiculos2.csv`): two older,

@@ -1,6 +1,6 @@
 """Adapters for the vehicle dictionary family of bronze sources.
 
-`DICIONÁRIO_VEÍCULOS/` on the raw data root holds several independently
+`DICIONÁRIO_VEÍCULOS/` on the raw data root held several independently
 extracted vehicle-identity crosswalks. All of them are ingested from this
 one module, same as how `adapters/avl.py` is one script handling AVL's
 several raw layouts across years -- except here, unlike AVL, the raw
@@ -14,10 +14,13 @@ None of these are a time series of raw files to pick a year/month from --
 each is a single, already-final CSV, snapshotted as of whenever it gets
 ingested (or an explicitly given date) rather than a date parsed out of
 the raw data itself, preserving the mapping as it existed at that point
-without overwriting previous snapshots. `ingest` (the live,
-currently-maintained `veiculos_atuais.csv`) is the only one of these
-still actively updated in place; the rest are static files that were
-simply never ingested before.
+without overwriting previous snapshots. `veiculos_atuais.csv` (the source
+behind `ingest_vehicle`) used to be the one exception -- a file that got
+updated in place over time -- but all five raw files were fully captured
+into bronze and then deleted from raw_data_root (kept only as an external
+backup) once nothing was left un-ingested, so every source here is now
+equally a one-time, static capture with no live file left behind it to
+re-run against.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from opa_database.loaders.bronze import write_bronze
 if TYPE_CHECKING:
     from pathlib import Path
 
-_LIVE_RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/veiculos_atuais.csv"
+_VEHICLE_RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/veiculos_atuais.csv"
 _LEGACY_RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/dicionario_veiculos.csv"
 _LEGACY2_RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/dicionario_veiculos2.csv"
 _2018_RAW_RELATIVE_PATH = "DICIONÁRIO_VEÍCULOS/veiculos2018.csv"
@@ -64,8 +67,10 @@ def _today() -> datetime.date:
     return datetime.datetime.now(tz=datetime.UTC).date()
 
 
-def ingest(snapshot_date: datetime.date | None = None) -> Path:
-    """Snapshot the current, live vehicle dictionary into the bronze layer.
+def ingest_vehicle(snapshot_date: datetime.date | None = None) -> Path:
+    """Snapshot the vehicle dictionary into the bronze layer.
+
+    Source: `veiculos_atuais.csv` (`cod_veiculo`/`id_veiculo`).
 
     Args:
         snapshot_date (datetime.date | None): Date to record the snapshot
@@ -76,7 +81,7 @@ def ingest(snapshot_date: datetime.date | None = None) -> Path:
 
     """
     date = snapshot_date or _today()
-    path = settings.raw_data_root / _LIVE_RAW_RELATIVE_PATH
+    path = settings.raw_data_root / _VEHICLE_RAW_RELATIVE_PATH
     df = pl.read_csv(path, separator=";", infer_schema_length=0)
     validated = VehicleDictionarySchema.validate(df)
     partitions = {"year": date.year, "month": date.month, "day": date.day}
@@ -133,10 +138,10 @@ def ingest_2018(snapshot_date: datetime.date | None = None) -> Path:
     """Snapshot the 2018 vehicle dictionary into the bronze layer.
 
     Source: `veiculos2018.csv` (`id_veiculo`/`cod_veiculo`, same shape as
-    the live file, reusing `VehicleDictionarySchema`). Kept as its own
-    bronze source rather than merged into `vehicle_dictionary`: nothing
-    confirms this file's `id_veiculo` values share an id space with the
-    current live file.
+    `veiculos_atuais.csv`, reusing `VehicleDictionarySchema`). Kept as
+    its own bronze source rather than merged into `vehicle_dictionary`:
+    nothing confirms this file's `id_veiculo` values share an id space
+    with `veiculos_atuais.csv`'s.
 
     Args:
         snapshot_date (datetime.date | None): Date to record the snapshot
@@ -160,13 +165,13 @@ def ingest_antigo(snapshot_date: datetime.date | None = None) -> Path:
     """Snapshot the "antigo" vehicle dictionary into the bronze layer.
 
     Source: `veiculos_antigo.csv` (`cod_veiculo`/`id_veiculo`, same shape
-    as the live file, reusing `VehicleDictionarySchema`). Its
+    as `veiculos_atuais.csv`, reusing `VehicleDictionarySchema`). Its
     `id_veiculo` values (single/double digits) are far smaller than
-    either the live file's or AVL's, so it is presumably an even earlier
-    snapshot than `veiculos2018.csv` -- kept as its own bronze source for
-    the same reason. Unlike the other raw dictionary files, this one is
-    ISO-8859-1 encoded, not UTF-8, so it's read as bytes and transcoded
-    before handing off to Polars.
+    either `veiculos_atuais.csv`'s or AVL's, so it is presumably an even
+    earlier snapshot than `veiculos2018.csv` -- kept as its own bronze
+    source for the same reason. Unlike the other raw dictionary files,
+    this one is ISO-8859-1 encoded, not UTF-8, so it's read as bytes and
+    transcoded before handing off to Polars.
 
     Args:
         snapshot_date (datetime.date | None): Date to record the snapshot
