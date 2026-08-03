@@ -3,10 +3,15 @@
 All six sources under `bronze/{vehicle_dictionary,device_dictionary,
 vehicle_dictionary_legacy,vehicle_dictionary_legacy2,
 vehicle_dictionary_2018,vehicle_dictionary_antigo}` load from this one
-module, mirroring `adapters/vehicle_dictionary.py`. Every one of them is
-kept as its own silver table rather than merged into `silver.vehicle_dictionary`,
-same reasoning as bronze: none of these files' id spaces are confirmed
-compatible with the live file's.
+module, mirroring `adapters/vehicle_dictionary.py`. Bronze source (and
+CLI source-argument) names are unchanged; only the silver table names
+carry a `dictionary_` prefix instead (`dictionary_vehicle`,
+`dictionary_device`, `dictionary_legacy`, `dictionary_legacy2`,
+`dictionary_2018`, `dictionary_antigo`), so they sort together
+alphabetically the same way `avl_*`/`afc_*`/`gtfs_*` do. Every one of
+them is kept as its own silver table rather than merged into
+`silver.dictionary_vehicle`, same reasoning as bronze: none of these
+files' id spaces are confirmed compatible with the live file's.
 
 Every table here follows the same shape: partitioned by day (matching
 each loader's own single-snapshot load calls, see
@@ -16,7 +21,7 @@ bronze source's own data) as a data-integrity safeguard, and a plain
 index on the other side of the mapping for lookup. Row counts are all in
 the low thousands, so partitioning here is about consistency with the
 other silver tables rather than a real perf need -- same note as the
-original `vehicle_dictionary` table.
+original `dictionary_vehicle` table.
 """
 
 from __future__ import annotations
@@ -34,15 +39,15 @@ from opa_database.loaders.silver import (
     replace_period,
 )
 
-_VEHICLE_DICTIONARY_TABLE = "silver.vehicle_dictionary"
-_LEGACY_TABLE = "silver.vehicle_dictionary_legacy"
-_LEGACY2_TABLE = "silver.vehicle_dictionary_legacy2"
-_DEVICE_DICTIONARY_TABLE = "silver.device_dictionary"
-_2018_TABLE = "silver.vehicle_dictionary_2018"
-_ANTIGO_TABLE = "silver.vehicle_dictionary_antigo"
+_VEHICLE_DICTIONARY_TABLE = "silver.dictionary_vehicle"
+_LEGACY_TABLE = "silver.dictionary_legacy"
+_LEGACY2_TABLE = "silver.dictionary_legacy2"
+_DEVICE_DICTIONARY_TABLE = "silver.dictionary_device"
+_2018_TABLE = "silver.dictionary_2018"
+_ANTIGO_TABLE = "silver.dictionary_antigo"
 
 _VEHICLE_DICTIONARY_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary (
+CREATE TABLE IF NOT EXISTS silver.dictionary_vehicle (
     snapshot_date date NOT NULL,
     cod_veiculo text NOT NULL,
     id_veiculo text NOT NULL
@@ -50,7 +55,7 @@ CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary (
 """
 
 _LEGACY_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_legacy (
+CREATE TABLE IF NOT EXISTS silver.dictionary_legacy (
     snapshot_date date NOT NULL,
     vehicleid text NOT NULL,
     numbus text NOT NULL
@@ -58,7 +63,7 @@ CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_legacy (
 """
 
 _LEGACY2_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_legacy2 (
+CREATE TABLE IF NOT EXISTS silver.dictionary_legacy2 (
     snapshot_date date NOT NULL,
     id text NOT NULL,
     carro text NOT NULL,
@@ -68,7 +73,7 @@ CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_legacy2 (
 """
 
 _DEVICE_DICTIONARY_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.device_dictionary (
+CREATE TABLE IF NOT EXISTS silver.dictionary_device (
     snapshot_date date NOT NULL,
     codigo text NOT NULL,
     device_id text,
@@ -82,7 +87,7 @@ CREATE TABLE IF NOT EXISTS silver.device_dictionary (
 """
 
 _2018_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_2018 (
+CREATE TABLE IF NOT EXISTS silver.dictionary_2018 (
     snapshot_date date NOT NULL,
     cod_veiculo text NOT NULL,
     id_veiculo text NOT NULL
@@ -90,7 +95,7 @@ CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_2018 (
 """
 
 _ANTIGO_PARENT_DDL = """
-CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_antigo (
+CREATE TABLE IF NOT EXISTS silver.dictionary_antigo (
     snapshot_date date NOT NULL,
     cod_veiculo text NOT NULL,
     id_veiculo text NOT NULL
@@ -99,7 +104,7 @@ CREATE TABLE IF NOT EXISTS silver.vehicle_dictionary_antigo (
 
 # cod_veiculo/vehicleid/carro/codigo (the AFC/"business" side of each
 # mapping) are deliberately not unique, even within one snapshot, in
-# general -- vehicle_dictionary's own cod_veiculo is the proven case
+# general -- dictionary_vehicle's own cod_veiculo is the proven case
 # (~2% reassigned). The GPS/device side (id_veiculo, vehicleid's
 # counterpart numbus... see below) gets the real unique constraint as a
 # data-integrity safeguard instead, verified unique within a snapshot for
@@ -110,7 +115,7 @@ _VEHICLE_DICTIONARY_INDEXES = (
     IndexSpec("snapshot_id_key", unique=True, definition="(snapshot_date, id_veiculo)"),
 )
 
-# Unlike vehicle_dictionary's cod_veiculo/id_veiculo, both sides of this
+# Unlike dictionary_vehicle's cod_veiculo/id_veiculo, both sides of this
 # particular mapping were verified unique within a snapshot (0 duplicates
 # on either column, first extraction) -- indexed accordingly, unique on
 # vehicleid (the GPS-side id, for parity with the other tables here) and
@@ -198,7 +203,7 @@ def _load_snapshot(
     parent_ddl: LiteralString,
     indexes: tuple[IndexSpec, ...],
     snapshot_date: datetime.date | None,
-) -> None:
+) -> str:
     date = snapshot_date or _find_latest_snapshot(source)
     df = (
         pl.scan_parquet(_bronze_path(source, date))
@@ -219,9 +224,10 @@ def _load_snapshot(
             parent_ddl=parent_ddl,
             indexes=indexes,
         )
+    return table
 
 
-def load(snapshot_date: datetime.date | None = None) -> None:
+def load(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary bronze snapshot into the silver layer.
 
     Defaults to the most recent bronze snapshot available. Keyed by its
@@ -234,8 +240,11 @@ def load(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="vehicle_dictionary",
         table=_VEHICLE_DICTIONARY_TABLE,
         columns=_VEHICLE_DICTIONARY_COLUMNS,
@@ -245,7 +254,7 @@ def load(snapshot_date: datetime.date | None = None) -> None:
     )
 
 
-def load_legacy(snapshot_date: datetime.date | None = None) -> None:
+def load_legacy(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary_legacy bronze snapshot into the silver layer.
 
     Args:
@@ -253,8 +262,11 @@ def load_legacy(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="vehicle_dictionary_legacy",
         table=_LEGACY_TABLE,
         columns=_LEGACY_COLUMNS,
@@ -264,7 +276,7 @@ def load_legacy(snapshot_date: datetime.date | None = None) -> None:
     )
 
 
-def load_legacy2(snapshot_date: datetime.date | None = None) -> None:
+def load_legacy2(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary_legacy2 bronze snapshot into the silver layer.
 
     Args:
@@ -272,8 +284,11 @@ def load_legacy2(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="vehicle_dictionary_legacy2",
         table=_LEGACY2_TABLE,
         columns=_LEGACY2_COLUMNS,
@@ -283,7 +298,7 @@ def load_legacy2(snapshot_date: datetime.date | None = None) -> None:
     )
 
 
-def load_device_dictionary(snapshot_date: datetime.date | None = None) -> None:
+def load_device_dictionary(snapshot_date: datetime.date | None = None) -> str:
     """Load a device_dictionary bronze snapshot into the silver layer.
 
     Args:
@@ -291,8 +306,11 @@ def load_device_dictionary(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="device_dictionary",
         table=_DEVICE_DICTIONARY_TABLE,
         columns=_DEVICE_DICTIONARY_COLUMNS,
@@ -302,7 +320,7 @@ def load_device_dictionary(snapshot_date: datetime.date | None = None) -> None:
     )
 
 
-def load_2018(snapshot_date: datetime.date | None = None) -> None:
+def load_2018(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary_2018 bronze snapshot into the silver layer.
 
     Args:
@@ -310,8 +328,11 @@ def load_2018(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="vehicle_dictionary_2018",
         table=_2018_TABLE,
         columns=_VEHICLE_DICTIONARY_COLUMNS,
@@ -321,7 +342,7 @@ def load_2018(snapshot_date: datetime.date | None = None) -> None:
     )
 
 
-def load_antigo(snapshot_date: datetime.date | None = None) -> None:
+def load_antigo(snapshot_date: datetime.date | None = None) -> str:
     """Load a vehicle_dictionary_antigo bronze snapshot into the silver layer.
 
     Args:
@@ -329,8 +350,11 @@ def load_antigo(snapshot_date: datetime.date | None = None) -> None:
             load. Defaults to the most recent snapshot found under
             `bronze_root`.
 
+    Returns:
+        str: The fully-qualified silver table loaded into.
+
     """
-    _load_snapshot(
+    return _load_snapshot(
         source="vehicle_dictionary_antigo",
         table=_ANTIGO_TABLE,
         columns=_VEHICLE_DICTIONARY_COLUMNS,
