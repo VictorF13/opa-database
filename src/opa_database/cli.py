@@ -1,5 +1,7 @@
 """Click entrypoint for running bronze-layer ingestion and silver-layer loads."""
 
+import datetime
+
 import click
 
 from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
@@ -14,8 +16,16 @@ _ADAPTERS = {
     "gtfs": gtfs,
 }
 
+# All of these live in the single adapters/vehicle_dictionary.py module
+# (see its docstring for why); the CLI just needs a source-name ->
+# ingest-function mapping, not a source-name -> module mapping.
 _REFERENCE_ADAPTERS = {
-    "vehicle_dictionary": vehicle_dictionary,
+    "vehicle_dictionary": vehicle_dictionary.ingest,
+    "device_dictionary": vehicle_dictionary.ingest_device_dictionary,
+    "vehicle_dictionary_legacy": vehicle_dictionary.ingest_legacy,
+    "vehicle_dictionary_legacy2": vehicle_dictionary.ingest_legacy2,
+    "vehicle_dictionary_2018": vehicle_dictionary.ingest_2018,
+    "vehicle_dictionary_antigo": vehicle_dictionary.ingest_antigo,
 }
 
 _SILVER_LOADERS = {
@@ -55,14 +65,32 @@ def ingest(source: str, year: int, month: int) -> None:
 
 @cli.command("ingest-reference")
 @click.argument("source", type=click.Choice(sorted(_REFERENCE_ADAPTERS)))
-def ingest_reference(source: str) -> None:
+@click.option(
+    "--snapshot-date",
+    "snapshot_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=None,
+    help=(
+        "Date to record the snapshot as (YYYY-MM-DD). Required for "
+        "device_dictionary, since it has no single current file to "
+        "default to; optional for every other reference source, which "
+        "default to today."
+    ),
+)
+def ingest_reference(source: str, snapshot_date: datetime.datetime | None) -> None:
     """Snapshot a reference SOURCE into the bronze layer.
 
     Args:
-        source (str): Reference source to snapshot (`vehicle_dictionary`).
+        source (str): Reference source to snapshot (`vehicle_dictionary`,
+            `device_dictionary`, `vehicle_dictionary_legacy`,
+            `vehicle_dictionary_legacy2`, `vehicle_dictionary_2018`, or
+            `vehicle_dictionary_antigo`).
+        snapshot_date (datetime.datetime | None): Date to record the
+            snapshot as.
 
     """
-    path = _REFERENCE_ADAPTERS[source].ingest()
+    date = snapshot_date.date() if snapshot_date else None
+    path = _REFERENCE_ADAPTERS[source](date)
     click.echo(path)
 
 
