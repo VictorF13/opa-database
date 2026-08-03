@@ -34,8 +34,16 @@ _SILVER_LOADERS = {
     "gtfs": silver_gtfs,
 }
 
+# All of these live in the single silver/vehicle_dictionary.py module
+# (see its docstring for why); the CLI just needs a source-name ->
+# load-function mapping, not a source-name -> module mapping.
 _SILVER_REFERENCE_LOADERS = {
-    "vehicle_dictionary": silver_vehicle_dictionary,
+    "vehicle_dictionary": silver_vehicle_dictionary.load,
+    "device_dictionary": silver_vehicle_dictionary.load_device_dictionary,
+    "vehicle_dictionary_legacy": silver_vehicle_dictionary.load_legacy,
+    "vehicle_dictionary_legacy2": silver_vehicle_dictionary.load_legacy2,
+    "vehicle_dictionary_2018": silver_vehicle_dictionary.load_2018,
+    "vehicle_dictionary_antigo": silver_vehicle_dictionary.load_antigo,
 }
 
 
@@ -113,12 +121,28 @@ def load_silver(source: str, year: int, month: int) -> None:
 
 @cli.command("load-silver-reference")
 @click.argument("source", type=click.Choice(sorted(_SILVER_REFERENCE_LOADERS)))
-def load_silver_reference(source: str) -> None:
-    """Load the latest reference SOURCE snapshot into the silver layer.
+@click.option(
+    "--snapshot-date",
+    "snapshot_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=None,
+    help=(
+        "Bronze snapshot date to load (YYYY-MM-DD). Defaults to the "
+        "most recent snapshot found for SOURCE under bronze_root."
+    ),
+)
+def load_silver_reference(source: str, snapshot_date: datetime.datetime | None) -> None:
+    """Load a reference SOURCE snapshot into the silver layer.
 
     Args:
-        source (str): Reference source to load (`vehicle_dictionary`).
+        source (str): Reference source to load (`vehicle_dictionary`,
+            `device_dictionary`, `vehicle_dictionary_legacy`,
+            `vehicle_dictionary_legacy2`, `vehicle_dictionary_2018`, or
+            `vehicle_dictionary_antigo`).
+        snapshot_date (datetime.datetime | None): Bronze snapshot date to
+            load. Defaults to the most recent snapshot found.
 
     """
-    _SILVER_REFERENCE_LOADERS[source].load()
+    date = snapshot_date.date() if snapshot_date else None
+    _SILVER_REFERENCE_LOADERS[source](date)
     click.echo(f"Loaded silver.{source}.")
