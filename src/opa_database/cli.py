@@ -144,5 +144,5 @@ def load_silver_reference(source: str, snapshot_date: datetime.datetime | None) 
 
     """
     date = snapshot_date.date() if snapshot_date else None
-    _SILVER_REFERENCE_LOADERS[source](date)
-    click.echo(f"Loaded silver.{source}.")
+    table = _SILVER_REFERENCE_LOADERS[source](date)
+    click.echo(f"Loaded {table}.")
