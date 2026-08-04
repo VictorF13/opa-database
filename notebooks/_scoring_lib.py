@@ -391,6 +391,23 @@ def score_candidate_mapping(
                     },
                 )
             conn.commit()
+            if not already_exists:
+                # The first batch just created table_name -- add the index the
+                # per-month "which candidates are already done" check above needs
+                # (on candidate_id_col, trip_opened_at) now, while the table is
+                # still one batch's worth of rows, instead of retrofitting it
+                # later once the table has grown to millions of rows. Without
+                # this, that check does a full sequential scan of the whole
+                # (ever-growing) table every month -- this bit
+                # device_mapping_trip_scores mid-run and needed a slow
+                # CREATE INDEX CONCURRENTLY to fix live.
+                index_name = f"{table_name.split('.')[-1]}_{candidate_id_col}_trip_idx"
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"CREATE INDEX IF NOT EXISTS {index_name} "
+                        f"ON {table_name} ({candidate_id_col}, trip_opened_at)"
+                    )
+                conn.commit()
             already_exists = True
             print(
                 f"  {month_start:%Y-%m} batch {i + 1}/{n_batches}: "
