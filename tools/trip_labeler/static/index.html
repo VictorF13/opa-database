@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Trip match labeler</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; display: flex; flex-direction: column;
+         height: 100vh; background: #ffffff; color: #111827; }
+  header { padding: 8px 16px; background: #111827; color: #f3f4f6; display: flex; gap: 24px; align-items: center;
+           font-size: 14px; flex-wrap: wrap; }
+  header b { color: #fff; }
+  #maps { flex: 1; min-height: 0; display: flex; gap: 6px; padding: 6px; background: #e5e7eb; }
+  .map-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; border-radius: 6px;
+              overflow: hidden; border: 1px solid #d1d5db; }
+  .map-title { padding: 4px 10px; font-size: 12px; font-weight: 600; background: #f3f4f6; color: #111827;
+               border-bottom: 1px solid #d1d5db; }
+  .map-box { flex: 1; }
+  .leaflet-tile-pane { filter: grayscale(45%) brightness(1.08); }
+  .label-tip { font-weight: 700; font-size: 11px; background: #111827 !important; color: #fff !important;
+               border: none !important; box-shadow: none !important; padding: 2px 6px !important; }
+  .label-tip::before { display: none !important; }
+  #panel { padding: 10px 16px; border-top: 1px solid #d1d5db; background: #fff; }
+  #candidates { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .cand-card { border: 2px solid #d1d5db; border-radius: 8px; padding: 8px 12px; min-width: 220px; font-size: 13px;
+               background: #fff; color: #111827; }
+  .cand-card.model-pick { border-color: #2563eb; }
+  #model-pred { font-size: 13px; padding: 4px 16px; background: #eef2ff; color: #111827; border-bottom: 1px solid #d1d5db; }
+  .cand-card table { border-collapse: collapse; color: #111827; }
+  .cand-card td { padding: 1px 6px 1px 0; white-space: nowrap; color: #111827; }
+  .cand-card td.v { text-align: right; font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  #actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font-size: 14px; padding: 8px 14px; border-radius: 6px; border: 1px solid #9ca3af; cursor: pointer;
+           background: #f9fafb; color: #111827; }
+  button.match { border-color: #2563eb; }
+  button.invalid { border-color: #dc2626; }
+  button.notroute { border-color: #d97706; }
+  button.unsure { border-color: #6b7280; }
+  button:hover { filter: brightness(0.95); }
+  kbd { background: #e5e7eb; border-radius: 3px; padding: 0 5px; font-size: 12px; color: #111827; }
+</style>
+</head>
+<body>
+<header>
+  <span>Labeled: <b id="stat-labels">0</b></span>
+  <span>Pool: <b id="stat-pool">0</b></span>
+  <span>Model: <b id="stat-model">cold start (random order)</b></span>
+  <span>Holdout: <b id="stat-holdout">n/a</b></span>
+  <span id="win-info"></span>
+</header>
+<div id="model-pred"></div>
+<div id="maps"></div>
+<div id="panel">
+  <div id="candidates"></div>
+  <div id="actions"></div>
+</div>
+
+<script>
+// green (#16a34a) and red (#dc2626) are reserved for start/end markers, avoided here
+const COLORS = ["#2563eb", "#ea580c", "#7c3aed", "#0891b2"]; // blue, orange, violet, cyan
+let maps = [];
+let current = null;
+
+function fmt(v, digits = 1) {
+  if (v === null || v === undefined) return "-";
+  return Number(v).toFixed(digits);
+}
+
+function pingColor(i, n) {
+  const t = n <= 1 ? 0 : i / (n - 1);
+  const v = Math.round(255 * (1 - t)); // white (early) -> black (late)
+  return `rgb(${v},${v},${v})`;
+}
+
+function squareIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:14px;height:14px;background:${color};border:2px solid #111;"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+function drawCandidateMap(divId, win, candidate, color) {
+  const map = L.map(divId, { zoomControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, opacity: 0.45, attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+
+  const bounds = [];
+
+  // route first, so it sits underneath the actual GPS trace
+  if (candidate.path && candidate.path.length) {
+    L.polyline(candidate.path, { color, weight: 7, opacity: 0.85 }).addTo(map);
+    const startLL = candidate.path[0];
+    const endLL = candidate.path[candidate.path.length - 1];
+    L.circleMarker(startLL, { radius: 10, color: "#0a3", weight: 2, fillColor: "#16a34a", fillOpacity: 1 })
+      .bindTooltip("START", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    L.marker(endLL, { icon: squareIcon("#dc2626") })
+      .bindTooltip("END", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    bounds.push(startLL, endLL, ...candidate.path);
+  }
+
+  // ping trace drawn last -> renders above the route line
+  const n = win.pings.length;
+  let prev = null;
+  win.pings.forEach((p, i) => {
+    const ll = [p.lat, p.lon];
+    bounds.push(ll);
+    if (prev) L.polyline([prev, ll], { color: "#374151", weight: 1.5, opacity: 0.7 }).addTo(map);
+    L.circleMarker(ll, { radius: 4, color: "#111", weight: 0.8, fillColor: pingColor(i, n), fillOpacity: 1 }).addTo(map);
+    prev = ll;
+  });
+
+  // the flex layout for .map-box hasn't necessarily settled its final height
+  // yet in this same tick, so Leaflet's container-size read (and therefore
+  // fitBounds' zoom/center math) can be based on a stale, too-short box.
+  // Deferring one frame lets layout finish first.
+  requestAnimationFrame(() => {
+    map.invalidateSize();
+    if (bounds.length) map.fitBounds(bounds, { padding: [24, 24] });
+    else map.setView([-3.73, -38.53], 12);
+  });
+  return map;
+}
+
+function render(win) {
+  current = win;
+  maps.forEach((m) => m.remove());
+  maps = [];
+
+  const mapsDiv = document.getElementById("maps");
+  mapsDiv.innerHTML = "";
+  win.candidates.forEach((c, idx) => {
+    const wrap = document.createElement("div");
+    wrap.className = "map-wrap";
+    const boxId = `map-${idx}`;
+    wrap.innerHTML = `<div class="map-title">
+        <span class="swatch" style="background:${COLORS[idx % COLORS.length]}"></span>
+        Candidate ${idx + 1} — ${c.shape_id} ${c.is_model_pick ? "(model pick)" : ""}
+      </div><div id="${boxId}" class="map-box"></div>`;
+    mapsDiv.appendChild(wrap);
+  });
+  // map divs must exist in the DOM before Leaflet can size them
+  win.candidates.forEach((c, idx) => {
+    maps.push(drawCandidateMap(`map-${idx}`, win, c, COLORS[idx % COLORS.length]));
+  });
+
+  const why = win.priority === "predicted_invalid" ? "model leans invalid" : win.priority === "uncertain" ? "uncertain" : "cold start";
+  document.getElementById("win-info").textContent =
+    `${win.source}:${win.entity_id} | line ${win.line_number} | ${win.trip_opened_at.replace("T", " ")} -> ${win.trip_closed_at.replace("T", " ")} | ${win.pings.length} pings | why: ${why}`;
+
+  document.getElementById("model-pred").innerHTML = renderModelPrediction(win.model_prediction);
+
+  const candDiv = document.getElementById("candidates");
+  candDiv.innerHTML = "";
+  win.candidates.forEach((c, idx) => {
+    const div = document.createElement("div");
+    div.className = "cand-card" + (c.is_model_pick ? " model-pick" : "");
+    div.innerHTML = `
+      <div><span class="swatch" style="background:${COLORS[idx % COLORS.length]}"></span>
+        <b>Candidate ${idx + 1}</b> ${c.is_model_pick ? "(model pick)" : ""}<br/>
+        <small>${c.shape_id} dir=${c.direction_id ?? "-"}</small></div>
+      <table>
+        <tr><td>avg dist to line</td><td class="v">${fmt(c.avg_dist_to_line_m)} m</td></tr>
+        <tr><td>progress corr</td><td class="v">${fmt(c.progress_corr, 3)}</td></tr>
+        <tr><td>start proximity</td><td class="v">${fmt(c.start_proximity_m)} m</td></tr>
+        <tr><td>end proximity</td><td class="v">${fmt(c.end_proximity_m)} m</td></tr>
+        <tr><td>speed percentile</td><td class="v">${fmt(c.speed_percentile, 3)}</td></tr>
+        <tr><td>implied speed</td><td class="v">${fmt(c.implied_speed_kmh)} km/h</td></tr>
+        <tr><td>pings in window</td><td class="v">${c.n_pings_in_window ?? "-"}</td></tr>
+        <tr><td>duration</td><td class="v">${fmt(c.duration_sec, 0)} s</td></tr>
+      </table>`;
+    candDiv.appendChild(div);
+  });
+
+  const actions = document.getElementById("actions");
+  actions.innerHTML = "";
+  win.candidates.forEach((c, idx) => {
+    const btn = document.createElement("button");
+    btn.className = "match";
+    btn.textContent = `[${idx + 1}] This is candidate ${idx + 1} (${c.shape_id})`;
+    btn.onclick = () => submit("MATCH", c.shape_id);
+    actions.appendChild(btn);
+  });
+  const invalidBtn = document.createElement("button");
+  invalidBtn.className = "invalid";
+  invalidBtn.innerHTML = `[I] INVALID TRIP <kbd>i</kbd>`;
+  invalidBtn.onclick = () => submit("INVALID_TRIP", null);
+  actions.appendChild(invalidBtn);
+
+  const notRouteBtn = document.createElement("button");
+  notRouteBtn.className = "notroute";
+  notRouteBtn.innerHTML = `[N] NOT THIS ROUTE <kbd>n</kbd>`;
+  notRouteBtn.onclick = () => submit("NOT_THIS_ROUTE", null);
+  actions.appendChild(notRouteBtn);
+
+  const unsureBtn = document.createElement("button");
+  unsureBtn.className = "unsure";
+  unsureBtn.innerHTML = `[U] UNSURE <kbd>u</kbd>`;
+  unsureBtn.onclick = () => submit("UNSURE", null);
+  actions.appendChild(unsureBtn);
+
+  updateStats(win.stats);
+}
+
+function updateStats(stats) {
+  document.getElementById("stat-labels").textContent = stats.n_labels;
+  document.getElementById("stat-pool").textContent = stats.pool_size;
+  if (!stats.validity_trained) {
+    document.getElementById("stat-model").textContent = `cold start (${stats.n_training_examples}/20 to activate)`;
+  } else {
+    const acc = stats.cv_accuracy === null || stats.cv_accuracy === undefined
+      ? "n/a (too little data yet for a nested estimate)"
+      : `${(stats.cv_accuracy * 100).toFixed(0)}% (nested, measured @ n=${stats.cv_accuracy_n})`;
+    const cand = stats.candidate_trained ? "valid+candidate" : "valid-only";
+    document.getElementById("stat-model").textContent = `active (${cand}, n=${stats.n_training_examples}, pipeline cv acc ${acc})`;
+  }
+
+  const fmtPct = (v) => (v === null || v === undefined ? "n/a" : `${(v * 100).toFixed(0)}%`);
+  if (stats.holdout_n === null || stats.holdout_n === undefined) {
+    document.getElementById("stat-holdout").textContent = "n/a";
+  } else {
+    document.getElementById("stat-holdout").textContent =
+      `validity ${fmtPct(stats.validity_holdout_accuracy)} / candidate ${fmtPct(stats.candidate_holdout_accuracy)} (@ n=${stats.holdout_n}, quick check, not nested)`;
+  }
+}
+
+function renderModelPrediction(mp) {
+  if (!mp || !mp.validity) return "Model: not trained yet (need 20+ labels with both outcomes seen).";
+  const v = mp.validity;
+  const vPct = (v.valid_probability * 100).toFixed(0);
+  let text = `Model 1 (validity): predicts <b>${v.predicted_valid ? "VALID" : "NOT VALID"}</b> (${vPct}% confidence)`;
+  if (mp.candidate) {
+    const c = mp.candidate;
+    text += ` &nbsp;|&nbsp; Model 2 (candidate): predicts <b>${c.predicted_shape_id}</b> (${(c.predicted_probability * 100).toFixed(0)}% confidence)`;
+  } else if (v.predicted_valid) {
+    text += ` &nbsp;|&nbsp; Model 2 (candidate): not applicable or not trained yet`;
+  }
+  return text;
+}
+
+async function loadNext() {
+  document.getElementById("win-info").textContent = "loading...";
+  const res = await fetch("/api/next");
+  if (!res.ok) {
+    document.getElementById("win-info").textContent = "pool exhausted";
+    return;
+  }
+  const win = await res.json();
+  render(win);
+}
+
+async function submit(decision, shapeId) {
+  if (!current) return;
+  const body = {
+    source: current.source,
+    entity_id: current.entity_id,
+    trip_opened_at: current.trip_opened_at,
+    trip_closed_at: current.trip_closed_at,
+    line_number: current.line_number,
+    resolved_feed_version_date: current.resolved_feed_version_date,
+    decision,
+    chosen_shape_id: shapeId,
+  };
+  await fetch("/api/label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  loadNext();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (!current) return;
+  if (e.key >= "1" && e.key <= "9") {
+    const idx = Number(e.key) - 1;
+    if (current.candidates[idx]) submit("MATCH", current.candidates[idx].shape_id);
+  } else if (e.key === "i" || e.key === "I") {
+    submit("INVALID_TRIP", null);
+  } else if (e.key === "n" || e.key === "N") {
+    submit("NOT_THIS_ROUTE", null);
+  } else if (e.key === "u" || e.key === "U") {
+    submit("UNSURE", null);
+  }
+});
+
+loadNext();
+</script>
+</body>
+</html>

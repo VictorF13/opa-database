@@ -25,14 +25,18 @@ opa-database = "opa_database.cli:cli"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115",
     "ipykernel>=7.3.0",
+    "joblib>=1.3",
     "jupyter>=1.1.1",
     "pandas>=3.0.5",
     "prek>=0.4.5",
     "pyarrow>=25.0.0",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
+    "scikit-learn>=1.5",
     "ty>=0.0.51",
+    "uvicorn>=0.32",
 ]
 
 [build-system]
@@ -46,9 +50,10 @@ lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "SLF001", "ANN201", "D103"]
 "notebooks/**" = ["T201", "INP001"]
+"tools/**" = ["INP001"]
 
 [tool.ty]
-src.include = ["src", "tests"]
+src.include = ["src", "tests", "tools"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
