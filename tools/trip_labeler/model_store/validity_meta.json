@@ -1,0 +1,21 @@
+{
+  "n_examples": 300,
+  "validity_params": {
+    "max_iter": 50,
+    "max_depth": 3,
+    "learning_rate": 0.2,
+    "l2_regularization": 0.0
+  },
+  "candidate_params": {
+    "max_iter": 200,
+    "max_depth": 3,
+    "learning_rate": 0.2,
+    "l2_regularization": 0.0
+  },
+  "cv_accuracy": 0.9366666666666666,
+  "cv_accuracy_n": 300,
+  "validity_holdout_accuracy": 0.9666666666666667,
+  "candidate_holdout_accuracy": 0.9666666666666667,
+  "holdout_n": 300,
+  "saved_at": "2026-08-05T23:27:28.097644+00:00"
+}

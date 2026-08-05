@@ -42,6 +42,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
@@ -396,6 +397,95 @@ def _nested_pipeline_cv_accuracy(examples: list[LabeledExample]) -> float | None
             )
             total += 1
     return correct / total if total else None
+
+
+def _binary_summary(y_true: list[int], y_pred: list[int]) -> dict[str, Any] | None:
+    """Precision/recall/F1 per class, overall accuracy, and confusion matrix.
+
+    `confusion_matrix` is [[tn, fp], [fn, tp]] with class 0 first, matching
+    sklearn's default label ordering for binary {0, 1} targets.
+    """
+    if not y_true or len(set(y_true)) < MIN_SAMPLES_PER_CLASS:
+        return None
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, labels=[0, 1], zero_division=0
+    )
+    correct = sum(t == p for t, p in zip(y_true, y_pred, strict=True))
+    return {
+        "n": len(y_true),
+        "accuracy": correct / len(y_true),
+        "per_class": {
+            str(label): {
+                "precision": float(precision[label]),
+                "recall": float(recall[label]),
+                "f1": float(f1[label]),
+                "support": int(support[label]),
+            }
+            for label in (0, 1)
+        },
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist(),
+    }
+
+
+def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
+    """Honest out-of-fold precision/recall/F1/accuracy for both models.
+
+    Same nested methodology as _nested_pipeline_cv_accuracy (fresh
+    hyperparameter search per outer fold, never touching that fold's own
+    held-out rows) - but instead of collapsing to one joint-pipeline
+    accuracy number, this collects every fold's raw predictions and scores
+    them once at the end. That's the standard way to report CV
+    classification metrics on a small sample: aggregating out-of-fold
+    predictions before scoring is more stable than averaging per-fold
+    metrics, which on ~5-row folds would be dominated by noise.
+    Class 1 = "valid" for the validity model, and "the naive-best candidate
+    was the right one" for the candidate model; class 0 is the opposite of
+    each.
+    """
+    y_valid = [e.is_valid for e in examples]
+    counts = Counter(y_valid)
+    if min(counts.values(), default=0) < MIN_SAMPLES_PER_CLASS:
+        return {"error": "not enough examples of each validity class yet"}
+    outer_folds = min(5, *counts.values())
+    if len(examples) < outer_folds * MIN_EXAMPLES_PER_OUTER_FOLD:
+        return {"error": "not enough examples yet for a stable estimate"}
+
+    skf = StratifiedKFold(n_splits=outer_folds, shuffle=True, random_state=0)
+    x_all = [e.features for e in examples]
+    valid_true: list[int] = []
+    valid_pred: list[int] = []
+    cand_true: list[int] = []
+    cand_pred: list[int] = []
+
+    for train_idx, test_idx in skf.split(x_all, y_valid):
+        train_ex = [examples[i] for i in train_idx]
+        test_ex = [examples[i] for i in test_idx]
+
+        vx, vy = _valid_xy(train_ex)
+        v_params = _tune_model(vx, vy)
+        vmodel = _fit_model(vx, vy, v_params)
+
+        cx, cy = _candidate_xy(train_ex)
+        cmodel = None
+        if len(set(cy)) > 1:
+            c_params = _tune_model(cx, cy)
+            cmodel = _fit_model(cx, cy, c_params)
+
+        for e in test_ex:
+            pv = int(vmodel.predict([e.features])[0])
+            valid_true.append(e.is_valid)
+            valid_pred.append(pv)
+            if e.picked_naive_best is not None and cmodel is not None:
+                cp = int(cmodel.predict([e.features])[0])
+                cand_true.append(e.picked_naive_best)
+                cand_pred.append(cp)
+
+    return {
+        "n_examples": len(examples),
+        "n_outer_folds": outer_folds,
+        "validity": _binary_summary(valid_true, valid_pred),
+        "candidate": _binary_summary(cand_true, cand_pred),
+    }
 
 
 class LabelIn(BaseModel):
@@ -1221,6 +1311,21 @@ def api_label(payload: LabelIn) -> dict[str, Any]:
     """Record a labeling decision for the current window."""
     store.submit_label(payload)
     return {"ok": True, "stats": store.stats()}
+
+
+@app.get("/api/metrics")
+def api_metrics() -> dict[str, Any]:
+    """Compute and persist full precision/recall/F1 metrics for both models.
+
+    Uses the current in-memory label set (store.examples), so it's always
+    consistent with whatever the running app has actually loaded. Written to
+    model_store/metrics.json on every call, alongside the deployed models.
+    """
+    metrics = _classification_metrics(store.examples)
+    metrics["computed_at"] = datetime.now(UTC).isoformat()
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    (MODEL_DIR / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    return metrics
 
 
 if __name__ == "__main__":
