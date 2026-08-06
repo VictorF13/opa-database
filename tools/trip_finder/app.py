@@ -19,19 +19,33 @@ display, and writing/reading rows in the new scratch.trip_finder_labels
 table. Does not touch scratch.trip_match_labels, any trip_labeler model file,
 or any gold table.
 
-Three cascaded models, same shared 23-feature vector:
-  - validity model: did this candidate vehicle actually run this trip, in
-    some form? (target: decision in the 5 MATCH_DECISIONS, trained on every
-    label)
-  - completeness model: GIVEN it's a match, which of the 5 subtypes (
-    IDA_FULL/IDA_PARTIAL/VOLTA_FULL/VOLTA_PARTIAL/BOTH)? (multiclass, trained
-    only on MATCH decisions)
-  - reason model: GIVEN it's not a match, DIFFERENT_ROUTE (a real, coherent
-    trip - just not this one) or INVALID (not really following any coherent
-    route)? (trained only on non-match decisions)
+Two cascaded models (originally three -- see NOT_THIS_ROUTE below), same
+shared 23-feature vector:
+  - validity model: did this candidate vehicle actually run this trip, on
+    this route, in some form? (binary: one of TARGET_MATCH_DECISIONS vs
+    NOT_THIS_ROUTE, trained on every label)
+  - completeness model: GIVEN it's a match, which of the 4 subtypes (
+    IDA_FULL/IDA_PARTIAL/VOLTA_FULL/VOLTA_PARTIAL)? (multiclass, trained
+    only on match decisions)
 day_of_week/hour_of_trip_start/hour_of_trip_end are passed to
 HistGradientBoostingClassifier as genuine categorical features (not plain
 ints), via categorical_features=CATEGORICAL_MASK.
+
+NOT_THIS_ROUTE: this app went through two label taxonomies. The first had 7
+classes -- 5 match subtypes (...including BOTH, a single candidate covering
+the full round trip) plus DIFFERENT_ROUTE and INVALID as separate reasons
+for a non-match. The final design collapses BOTH/DIFFERENT_ROUTE/INVALID
+into one NOT_THIS_ROUTE class and drops the third (reason) model entirely --
+there's nothing left to sub-classify once "not a match" is a single class.
+Critically, scratch.trip_finder_labels itself was NEVER rewritten to match:
+every label is still stored exactly as originally submitted, 7-class
+scheme included. The collapse happens only in _normalize_decision, applied
+at read time when building training examples -- never by mutating stored
+history. LabelIn/ALL_DECISIONS/MATCH_DECISIONS/REASON_DECISIONS below stay
+the full original 7-class set for exactly this reason: that's what the
+(untouched) database CHECK constraint accepts, so the original UI keeps
+working unchanged if it's ever reopened, even though nothing new trains on
+the reason distinction anymore.
 
 Two separate views of the same scored data, computed independently:
   - coverage stat (_best_per_trip): collapses to ONE row per trip, its
@@ -43,8 +57,8 @@ Two separate views of the same scored data, computed independently:
     the labeler almost never saw a genuine negative example (it's usually
     already right), so the validity model could never accumulate both
     classes. Once a model exists, three interleaved tracks (random,
-    uncertain, and whichever of the 7 decision classes is rarest so far)
-    keep it learning to predict well everywhere, not just at whatever
+    uncertain, and whichever of the 5 target decision classes is rarest so
+    far) keep it learning to predict well everywhere, not just at whatever
     boundary it already knows about.
 
 Run with:
@@ -191,6 +205,10 @@ NATURAL_KEY_COLUMNS = [
     "candidate_vehicle_id",
 ]
 
+# Original 7-class scheme -- unchanged, still exactly what the (untouched)
+# scratch.trip_finder_labels CHECK constraint accepts and what LabelIn
+# validates. Nothing below this comment block trains on the distinction
+# between these seven values directly; see _normalize_decision.
 MatchDecision = Literal[
     "IDA_FULL", "IDA_PARTIAL", "VOLTA_FULL", "VOLTA_PARTIAL", "BOTH"
 ]
@@ -206,6 +224,28 @@ MATCH_DECISIONS: tuple[MatchDecision, ...] = (
 REASON_DECISIONS: tuple[ReasonDecision, ...] = ("DIFFERENT_ROUTE", "INVALID")
 ALL_DECISIONS: tuple[Decision, ...] = MATCH_DECISIONS + REASON_DECISIONS
 
+# Target taxonomy this model actually trains on -- see the module docstring's
+# NOT_THIS_ROUTE section. Applied via _normalize_decision at read time only.
+NOT_THIS_ROUTE = "NOT_THIS_ROUTE"
+TARGET_MATCH_DECISIONS: tuple[str, ...] = (
+    "IDA_FULL",
+    "IDA_PARTIAL",
+    "VOLTA_FULL",
+    "VOLTA_PARTIAL",
+)
+TARGET_DECISIONS: tuple[str, ...] = (*TARGET_MATCH_DECISIONS, NOT_THIS_ROUTE)
+_LEGACY_NOT_THIS_ROUTE = {"DIFFERENT_ROUTE", "INVALID", "BOTH"}
+
+
+def _normalize_decision(raw_decision: str) -> str:
+    """Map a raw stored (7-class) decision to this model's 5-class target.
+
+    scratch.trip_finder_labels is never rewritten -- every label stays
+    exactly as originally submitted. This is the only place the
+    BOTH/DIFFERENT_ROUTE/INVALID -> NOT_THIS_ROUTE collapse happens.
+    """
+    return NOT_THIS_ROUTE if raw_decision in _LEGACY_NOT_THIS_ROUTE else raw_decision
+
 
 def _clean(v: Any) -> Any:  # noqa: ANN401
     """Turn NaN into None so it survives standard JSON serialization."""
@@ -220,17 +260,22 @@ class LabeledExample:
 
     features: list[float]
     is_valid: int
-    completeness_label: str | None  # one of MATCH_DECISIONS, only when is_valid
-    reason_label: str | None  # one of REASON_DECISIONS, only when not is_valid
+    completeness_label: str | None  # one of TARGET_MATCH_DECISIONS, only when is_valid
 
 
 def _build_example(features: list[float], decision: str) -> LabeledExample:
-    is_valid = decision in MATCH_DECISIONS
+    """Build a training example, applying the raw-to-target decision mapping.
+
+    `decision` here is whatever was actually stored (7-class scheme,
+    unchanged) -- _normalize_decision is what turns BOTH/DIFFERENT_ROUTE/
+    INVALID into NOT_THIS_ROUTE for training purposes.
+    """
+    normalized = _normalize_decision(decision)
+    is_valid = normalized in TARGET_MATCH_DECISIONS
     return LabeledExample(
         features=features,
         is_valid=1 if is_valid else 0,
-        completeness_label=decision if is_valid else None,
-        reason_label=None if is_valid else decision,
+        completeness_label=normalized if is_valid else None,
     )
 
 
@@ -257,7 +302,7 @@ def _to_x(features: list[list[float]]) -> np.ndarray:
     categorical_features (see CATEGORICAL_MASK) makes sklearn call X.shape
     before doing any conversion of its own -- a plain list of lists doesn't
     have .shape, so every .fit()/.predict()/.predict_proba() call on one of
-    this app's own three models MUST go through here first, or it fails
+    this app's own two models MUST go through here first, or it fails
     (silently, from the caller's point of view: RandomizedSearchCV just
     reports "all fits failed" and _tune_model swallows that into {}).
     """
@@ -275,12 +320,6 @@ def _completeness_xy(examples: list[LabeledExample]) -> tuple[np.ndarray, list[s
     labels = [
         e.completeness_label for e in examples if e.completeness_label is not None
     ]
-    return _to_x(feats), labels
-
-
-def _reason_xy(examples: list[LabeledExample]) -> tuple[np.ndarray, list[str]]:
-    feats = [e.features for e in examples if e.reason_label is not None]
-    labels = [e.reason_label for e in examples if e.reason_label is not None]
     return _to_x(feats), labels
 
 
@@ -361,14 +400,15 @@ MIN_EXAMPLES_PER_OUTER_FOLD = 5
 
 
 def _nested_cascade_cv_accuracy(examples: list[LabeledExample]) -> float | None:
-    """Honest nested CV of the full 3-model cascade chained together.
+    """Honest nested CV of the 2-model cascade chained together.
 
-    Correct only if the validity call is right, AND (when valid) the
-    completeness call is also exactly right, OR (when not valid) the reason
-    call is also exactly right. Hyperparameters are searched fresh inside
-    each outer fold on that fold's training rows only -- see
-    tools/trip_labeler/app.py's _nested_pipeline_cv_accuracy for the full
-    rationale (unchanged here, just extended to a 3-way cascade instead of 2).
+    Correct only if the validity call is right, AND (when it's a match) the
+    completeness call is also exactly right -- with only one non-match
+    class (NOT_THIS_ROUTE) left, a correct "not valid" validity call is
+    automatically the whole answer, nothing further to sub-classify.
+    Hyperparameters are searched fresh inside each outer fold on that
+    fold's training rows only -- see tools/trip_labeler/app.py's
+    _nested_pipeline_cv_accuracy for the full rationale.
     """
     y_valid = [e.is_valid for e in examples]
     counts = Counter(y_valid)
@@ -391,18 +431,15 @@ def _nested_cascade_cv_accuracy(examples: list[LabeledExample]) -> float | None:
         cx, cy = _completeness_xy(train_ex)
         cmodel = _fit_model(cx, cy, _tune_model(cx, cy)) if _fittable(cy) else None
 
-        rx, ry = _reason_xy(train_ex)
-        rmodel = _fit_model(rx, ry, _tune_model(rx, ry)) if _fittable(ry) else None
-
         for e in test_ex:
             row = _to_x([e.features])
             pred_valid = int(vmodel.predict(row)[0])
-            if pred_valid == 1:
-                predicted = cmodel.predict(row)[0] if cmodel is not None else None
-            else:
-                predicted = rmodel.predict(row)[0] if rmodel is not None else None
-            actual = e.completeness_label if e.is_valid else e.reason_label
-            correct += pred_valid == e.is_valid and predicted == actual
+            predicted = None
+            if pred_valid == 1 and cmodel is not None:
+                predicted = cmodel.predict(row)[0]
+            correct += pred_valid == e.is_valid and (
+                pred_valid == 0 or predicted == e.completeness_label
+            )
             total += 1
     return correct / total if total else None
 
@@ -435,7 +472,7 @@ def _multiclass_summary(
 
 
 def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
-    """Honest out-of-fold precision/recall/F1/accuracy for all three models."""
+    """Honest out-of-fold precision/recall/F1/accuracy for both models."""
     y_valid = [e.is_valid for e in examples]
     counts = Counter(y_valid)
     if not _fittable(y_valid):
@@ -450,8 +487,6 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
     valid_pred: list[int] = []
     comp_true: list[str] = []
     comp_pred: list[str] = []
-    reason_true: list[str] = []
-    reason_pred: list[str] = []
 
     for train_idx, test_idx in skf.split(x_all, y_valid):
         train_ex = [examples[i] for i in train_idx]
@@ -463,9 +498,6 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
         cx, cy = _completeness_xy(train_ex)
         cmodel = _fit_model(cx, cy, _tune_model(cx, cy)) if _fittable(cy) else None
 
-        rx, ry = _reason_xy(train_ex)
-        rmodel = _fit_model(rx, ry, _tune_model(rx, ry)) if _fittable(ry) else None
-
         for e in test_ex:
             row = _to_x([e.features])
             pv = int(vmodel.predict(row)[0])
@@ -474,9 +506,6 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
             if e.completeness_label is not None and cmodel is not None:
                 comp_true.append(e.completeness_label)
                 comp_pred.append(cmodel.predict(row)[0])
-            if e.reason_label is not None and rmodel is not None:
-                reason_true.append(e.reason_label)
-                reason_pred.append(rmodel.predict(row)[0])
 
     return {
         "n_examples": len(examples),
@@ -484,8 +513,9 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
         "validity": _multiclass_summary(
             [str(v) for v in valid_true], [str(v) for v in valid_pred], ("0", "1")
         ),
-        "completeness": _multiclass_summary(comp_true, comp_pred, MATCH_DECISIONS),
-        "reason": _multiclass_summary(reason_true, reason_pred, REASON_DECISIONS),
+        "completeness": _multiclass_summary(
+            comp_true, comp_pred, TARGET_MATCH_DECISIONS
+        ),
     }
 
 
@@ -643,15 +673,12 @@ class LabelStore:
         self.examples: list[LabeledExample] = []
         self.validity_model: HistGradientBoostingClassifier | None = None
         self.completeness_model: HistGradientBoostingClassifier | None = None
-        self.reason_model: HistGradientBoostingClassifier | None = None
         self.validity_params: dict[str, Any] = {}
         self.completeness_params: dict[str, Any] = {}
-        self.reason_params: dict[str, Any] = {}
         self.cv_accuracy: float | None = None
         self.cv_accuracy_n: int | None = None
         self.validity_holdout_accuracy: float | None = None
         self.completeness_holdout_accuracy: float | None = None
-        self.reason_holdout_accuracy: float | None = None
         self.holdout_n: int | None = None
         self.n_labels = self._count_labels()
         self._labeled_keys: set[tuple[Any, ...]] = set()
@@ -756,15 +783,10 @@ class LabelStore:
             meta = json.loads(meta_path.read_text())
             self.validity_params = meta.get("validity_params", {})
             self.completeness_params = meta.get("completeness_params", {})
-            self.reason_params = meta.get("reason_params", {})
             self.validity_model = joblib.load(validity_path)
             completeness_path = MODEL_DIR / "completeness_model.joblib"
             self.completeness_model = (
                 joblib.load(completeness_path) if completeness_path.exists() else None
-            )
-            reason_path = MODEL_DIR / "reason_model.joblib"
-            self.reason_model = (
-                joblib.load(reason_path) if reason_path.exists() else None
             )
         except Exception:  # noqa: BLE001 - any load failure just means: retrain
             return False
@@ -777,7 +799,6 @@ class LabelStore:
             self.completeness_holdout_accuracy = meta.get(
                 "completeness_holdout_accuracy"
             )
-            self.reason_holdout_accuracy = meta.get("reason_holdout_accuracy")
             self.holdout_n = meta.get("holdout_n")
         return True
 
@@ -793,9 +814,6 @@ class LabelStore:
             cx, cy = _completeness_xy(self.examples)
             if _fittable(cy):
                 self.completeness_params = _tune_model(cx, cy)
-            rx, ry = _reason_xy(self.examples)
-            if _fittable(ry):
-                self.reason_params = _tune_model(rx, ry)
             self.cv_accuracy = _nested_cascade_cv_accuracy(self.examples)
             self.cv_accuracy_n = len(self.examples)
         self.validity_model = _fit_model(vx, vy, self.validity_params)
@@ -803,19 +821,12 @@ class LabelStore:
         self.completeness_model = (
             _fit_model(cx, cy, self.completeness_params) if _fittable(cy) else None
         )
-        rx, ry = _reason_xy(self.examples)
-        self.reason_model = (
-            _fit_model(rx, ry, self.reason_params) if _fittable(ry) else None
-        )
 
         self.validity_holdout_accuracy = _holdout_accuracy(vx, vy, self.validity_params)
         self.completeness_holdout_accuracy = (
             _holdout_accuracy(cx, cy, self.completeness_params)
             if _fittable(cy)
             else None
-        )
-        self.reason_holdout_accuracy = (
-            _holdout_accuracy(rx, ry, self.reason_params) if _fittable(ry) else None
         )
         self.holdout_n = len(self.examples)
         self._save_models()
@@ -828,20 +839,25 @@ class LabelStore:
             joblib.dump(
                 self.completeness_model, MODEL_DIR / "completeness_model.joblib"
             )
-        if self.reason_model is not None:
-            joblib.dump(self.reason_model, MODEL_DIR / "reason_model.joblib")
         meta = {
             "n_examples": len(self.examples),
             "validity_params": self.validity_params,
             "completeness_params": self.completeness_params,
-            "reason_params": self.reason_params,
             "cv_accuracy": self.cv_accuracy,
             "cv_accuracy_n": self.cv_accuracy_n,
             "validity_holdout_accuracy": self.validity_holdout_accuracy,
             "completeness_holdout_accuracy": self.completeness_holdout_accuracy,
-            "reason_holdout_accuracy": self.reason_holdout_accuracy,
             "holdout_n": self.holdout_n,
             "saved_at": datetime.now(UTC).isoformat(),
+            "target_decisions": list(TARGET_DECISIONS),
+            "description": (
+                "2-layer cascade: validity (MATCH vs NOT_THIS_ROUTE) then "
+                "completeness (IDA_FULL/IDA_PARTIAL/VOLTA_FULL/VOLTA_PARTIAL, "
+                "only when MATCH). NOT_THIS_ROUTE collapses the original "
+                "BOTH/DIFFERENT_ROUTE/INVALID split; scratch.trip_finder_labels "
+                "itself keeps every label in that original 7-class form -- see "
+                "_normalize_decision."
+            ),
         }
         (MODEL_DIR / "validity_meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -954,51 +970,43 @@ class LabelStore:
                     axis=1
                 )  # 0 = certain, up to 1 = maximally unsure
                 uncertainty[valid_mask] = np.minimum(uncertainty[valid_mask], margin)
-        if self.reason_model is not None:
-            invalid_mask = p_valid < PROBABILITY_THRESHOLD
-            if invalid_mask.any():
-                p_reason = self.reason_model.predict_proba(x[invalid_mask])[:, 1]
-                uncertainty[invalid_mask] = np.minimum(
-                    uncertainty[invalid_mask], np.abs(p_reason - 0.5)
-                )
         return uncertainty, p_valid
 
     def _rarest_class_score(self, df: pl.DataFrame, p_valid: np.ndarray) -> np.ndarray:
-        """P(whichever of the 7 decision classes has been labeled least so far).
+        """P(whichever of the 5 target decision classes has been labeled least so far).
 
-        Combines the validity split with the relevant sub-model via the
-        chain rule (P(class) = P(valid) * P(class | valid), or the mirror
-        for a reason class) so this always answers "how likely is THIS
-        specific rare class", not just "how likely is MATCH" -- otherwise,
-        once completeness/reason models exist, the 5-way MATCH split (or the
-        2-way reason split) could still starve on whichever of ITS classes is
-        rarest even while MATCH-vs-not looks perfectly balanced.
+        Combines the validity split with the completeness sub-model via the
+        chain rule (P(class) = P(valid) * P(class | valid)) so this always
+        answers "how likely is THIS specific rare class", not just "how
+        likely is MATCH" -- otherwise, once the completeness model exists,
+        its own 4-way split could still starve on whichever of ITS classes
+        is rarest even while MATCH-vs-not looks perfectly balanced.
+        NOT_THIS_ROUTE needs no sub-model at all: it's a single class, so
+        1-p_valid already IS its full probability.
 
-        If the rarest class has ZERO labels so far, it won't even be in the
-        relevant sub-model's classes_ (sklearn only knows classes it's
-        actually seen) -- there is no learned signal for it at all yet, so
-        the honest fallback is random exploration, not silently collapsing
-        into P(valid)/P(invalid) (which just duplicates the "promising"
-        signal the other tracks already cover and was the actual bug behind
-        this track feeling repetitive: BOTH had 0 labels, so this always
-        fell through to plain P(valid) instead of ever seeking BOTH out).
+        If the rarest MATCH class has ZERO labels so far, it won't even be
+        in the completeness model's classes_ (sklearn only knows classes
+        it's actually seen) -- there is no learned signal for it at all yet,
+        so the honest fallback is random exploration, not silently
+        collapsing into P(valid) (which just duplicates the "promising"
+        signal the other tracks already cover).
         """
-        decisions = (e.completeness_label or e.reason_label for e in self.examples)
+        decisions = (
+            e.completeness_label if e.is_valid else NOT_THIS_ROUTE
+            for e in self.examples
+        )
         decision_counts = Counter(decisions)
-        rarest = min(ALL_DECISIONS, key=lambda d: decision_counts.get(d, 0))
-        x = _feature_matrix(df)
-        if rarest in MATCH_DECISIONS and self.completeness_model is not None:
+        rarest = min(TARGET_DECISIONS, key=lambda d: decision_counts.get(d, 0))
+        if rarest == NOT_THIS_ROUTE:
+            return 1 - p_valid
+        if self.completeness_model is not None:
             classes = list(self.completeness_model.classes_)
             if rarest in classes:
+                x = _feature_matrix(df)
                 p_class = self.completeness_model.predict_proba(x)[
                     :, classes.index(rarest)
                 ]
                 return p_valid * p_class
-        elif rarest not in MATCH_DECISIONS and self.reason_model is not None:
-            classes = list(self.reason_model.classes_)
-            if rarest in classes:
-                p_class = self.reason_model.predict_proba(x)[:, classes.index(rarest)]
-                return (1 - p_valid) * p_class
         return np.random.default_rng().random(len(df))
 
     def _refill(self) -> None:
@@ -1018,13 +1026,14 @@ class LabelStore:
             calibrated across the whole feature space, not just near
             whatever edge cases the other two tracks keep circling.
           - uncertain: closest to a coin flip across the whole cascade
-            (validity, then completeness or reason as applicable) -- refines
-            the decision boundary.
+            (validity, then completeness when applicable) -- refines the
+            decision boundary.
           - rarest class (see _rarest_class_score): forces continued
-            exposure to whichever of the 7 decision classes has the fewest
-            labels so far, regardless of how confident the model already is
-            about it -- pure uncertainty sampling alone won't reliably keep
-            surfacing a class the model has already learned to dismiss.
+            exposure to whichever of the 5 target decision classes has the
+            fewest labels so far, regardless of how confident the model
+            already is about it -- pure uncertainty sampling alone won't
+            reliably keep surfacing a class the model has already learned
+            to dismiss.
         """
         self.data.refresh()
         self._load_training_history()
@@ -1167,13 +1176,11 @@ class LabelStore:
             "n_batches_loaded": len(self.data._loaded_files),  # noqa: SLF001
             "validity_trained": self.validity_model is not None,
             "completeness_trained": self.completeness_model is not None,
-            "reason_trained": self.reason_model is not None,
             "n_training_examples": len(self.examples),
             "cv_accuracy": self.cv_accuracy,
             "cv_accuracy_n": self.cv_accuracy_n,
             "validity_holdout_accuracy": self.validity_holdout_accuracy,
             "completeness_holdout_accuracy": self.completeness_holdout_accuracy,
-            "reason_holdout_accuracy": self.reason_holdout_accuracy,
             "holdout_n": self.holdout_n,
             **self.coverage(),
         }
@@ -1242,20 +1249,6 @@ def _candidate_to_json(row: dict[str, Any]) -> dict[str, Any]:
             "predicted_probability": round(float(proba[best_i]), 4),
         }
 
-    reason_pred: dict[str, Any] | None = None
-    if (
-        store.reason_model is not None
-        and validity_pred is not None
-        and not validity_pred["predicted_valid"]
-    ):
-        proba = store.reason_model.predict_proba(x)[0]
-        classes = store.reason_model.classes_
-        best_i = int(np.argmax(proba))
-        reason_pred = {
-            "predicted_reason": str(classes[best_i]),
-            "predicted_probability": round(float(proba[best_i]), 4),
-        }
-
     pings = _fetch_pings(
         row["candidate_vehicle_id"], row["trip_opened_at"], row["trip_closed_at"]
     )
@@ -1271,7 +1264,6 @@ def _candidate_to_json(row: dict[str, Any]) -> dict[str, Any]:
         "model_prediction": {
             "validity": validity_pred,
             "completeness": completeness_pred,
-            "reason": reason_pred,
         },
         "features": {c: _clean(row[c]) for c in FEATURE_COLUMNS},
         "pings": pings,

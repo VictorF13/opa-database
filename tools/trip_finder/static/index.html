@@ -236,7 +236,6 @@ function updateStats(stats) {
     const models = [
       "valid",
       stats.completeness_trained ? "completeness" : null,
-      stats.reason_trained ? "reason" : null,
     ].filter(Boolean).join("+");
     document.getElementById("stat-model").textContent = `active (${models}, n=${stats.n_training_examples}, cascade cv acc ${acc})`;
   }
@@ -246,26 +245,25 @@ function updateStats(stats) {
     document.getElementById("stat-holdout").textContent = "n/a";
   } else {
     document.getElementById("stat-holdout").textContent =
-      `validity ${fmtPct(stats.validity_holdout_accuracy)} / completeness ${fmtPct(stats.completeness_holdout_accuracy)} / reason ${fmtPct(stats.reason_holdout_accuracy)} (@ n=${stats.holdout_n})`;
+      `validity ${fmtPct(stats.validity_holdout_accuracy)} / completeness ${fmtPct(stats.completeness_holdout_accuracy)} (@ n=${stats.holdout_n})`;
   }
 }
 
 function renderModelPrediction(mp) {
   if (!mp || !mp.validity) return "Model: not trained yet (need 20+ labels with both outcomes seen).";
   const v = mp.validity;
-  const vPct = (v.valid_probability * 100).toFixed(0);
-  let text = `Model 1 (validity): predicts <b>${v.predicted_valid ? "MATCH" : "NOT MATCH"}</b> (${vPct}% confidence)`;
+  // valid_probability is always raw P(MATCH) -- confidence in whichever call
+  // was actually made is that when predicting MATCH, but 1-p when predicting
+  // NOT_THIS_ROUTE (mirroring how completeness below already reports the
+  // probability of its own argmax class, not of a fixed reference class).
+  const vConfidence = v.predicted_valid ? v.valid_probability : 1 - v.valid_probability;
+  const vPct = (vConfidence * 100).toFixed(0);
+  let text = `Model 1 (validity): predicts <b>${v.predicted_valid ? "MATCH" : "NOT_THIS_ROUTE"}</b> (${vPct}% confidence)`;
   if (mp.completeness) {
     const c = mp.completeness;
     text += ` &nbsp;|&nbsp; Model 2 (completeness): predicts <b>${c.predicted_completeness}</b> (${(c.predicted_probability * 100).toFixed(0)}% confidence)`;
   } else if (v.predicted_valid) {
     text += ` &nbsp;|&nbsp; Model 2 (completeness): not trained yet`;
-  }
-  if (mp.reason) {
-    const r = mp.reason;
-    text += ` &nbsp;|&nbsp; Model 3 (reason): predicts <b>${r.predicted_reason}</b> (${(r.predicted_probability * 100).toFixed(0)}% confidence)`;
-  } else if (!v.predicted_valid) {
-    text += ` &nbsp;|&nbsp; Model 3 (reason): not trained yet`;
   }
   return text;
 }
