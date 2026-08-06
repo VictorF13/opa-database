@@ -172,6 +172,88 @@ FEATURE_COLUMNS = [
     "spatial_dispersion_m",
 ]
 
+MAX_BATCH_TRIPS_PER_BUS = 40
+# How many rendered (shapes+pings) instances /api/rapid/next sends up front,
+# and how many more /api/rapid/page sends per subsequent page -- kept small
+# since rendering a trip means real DB round trips (shapes_latlon_for,
+# single_candidate_pings), not just a JSONB slice. The full stored pool per
+# candidate is every winning trip up to MAX_BATCH_TRIPS_PER_BUS, so a
+# candidate that dominated many trips has real depth to page through.
+INSTANCES_PER_PAGE = 2
+
+# FULL means the model saw the whole leg (start to end); PARTIAL means it
+# only caught part of it -- a weaker, less legible trip to review on a map.
+# NOT_THIS_ROUTE (or anything else predict_trips doesn't emit) sorts last.
+_COMPLETENESS_RANK = {
+    "IDA_FULL": 0,
+    "VOLTA_FULL": 0,
+    "IDA_PARTIAL": 1,
+    "VOLTA_PARTIAL": 1,
+}
+
+
+def _completeness_rank(completeness: str | None) -> int:
+    """Rank a predicted completeness class, FULL first, PARTIAL next, else last."""
+    return _COMPLETENESS_RANK.get(completeness, 2)
+
+
+def _diversify_by_route(
+    wins: list[tuple[dict[str, Any], float, str | None, float | None]],
+) -> list[tuple[dict[str, Any], float, str | None, float | None]]:
+    """Reorder wins so distinct routes come first, without dropping any.
+
+    A given AVL vehicle overwhelmingly runs one route all day, so a strict
+    one-instance-per-route dedup left most candidates with exactly one
+    stored instance no matter how much evidence backed them (observed: a
+    candidate that won 15/40 scored trips collapsed to a single instance).
+    This keeps every winning trip -- interleaved round-robin across
+    line_number, in each line's incoming (completeness, then probability)
+    order -- so a bus running several routes shows different ones first,
+    but a bus/candidate that only ever ran one route still has real depth
+    to page through.
+    """
+    by_line: dict[
+        str, list[tuple[dict[str, Any], float, str | None, float | None]]
+    ] = {}
+    for win in wins:
+        by_line.setdefault(win[0]["line_number"], []).append(win)
+    queues = list(by_line.values())
+    interleaved = []
+    for i in range(max((len(q) for q in queues), default=0)):
+        interleaved.extend(q[i] for q in queues if i < len(q))
+    return interleaved
+
+
+def _order_trips(trips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order trips longest-GTFS-route-first, round-robin across lines.
+
+    Within each line, longest route first; across lines, round-robin
+    (most-trips-remaining line first so a line with a long tail doesn't
+    get starved behind short ones).
+
+    Shared by start_prefetch (interactive review's serving order) and
+    _batch_score_bus (which additionally caps to the first
+    MAX_BATCH_TRIPS_PER_BUS of this order -- see that function's docstring
+    for why scoring literally every trip isn't necessary or worth the time).
+    """
+    by_line: dict[str, list[dict[str, Any]]] = {}
+    for trip in trips:
+        by_line.setdefault(trip["line_number"], []).append(trip)
+    for line_trips in by_line.values():
+        line_trips.sort(
+            key=lambda t: (
+                t["_shape_length_m"],
+                t["trip_closed_at"] - t["trip_opened_at"],
+            ),
+            reverse=True,
+        )
+    queues = sorted(by_line.values(), key=len, reverse=True)
+    interleaved: list[dict[str, Any]] = []
+    for i in range(max((len(q) for q in queues), default=0)):
+        interleaved.extend(q[i] for q in queues if i < len(q))
+    return interleaved
+
+
 app = FastAPI()
 
 
@@ -209,14 +291,21 @@ class IdentityStore:
         """Connect to Postgres (main + a dedicated prefetch connection)."""
         self.conn = psycopg.connect(dsn, autocommit=True)
         self.prefetch_conn = psycopg.connect(dsn, autocommit=True)
-        self.batch_conn = psycopg.connect(dsn, autocommit=True)
-        # Exclusively for /api/rapid/* request handlers -- batch_conn is
-        # exclusively for _batch_worker/_batch_score_bus, which holds it
-        # busy for 1-3s at a time scoring a trip. A rapid-review request
-        # sharing that same connection would have to queue up behind
-        # whatever the background pass was already doing, and psycopg
+        # Exclusively for /api/rapid/* request handlers -- each _batch_worker
+        # thread opens and owns its own connection instead (see
+        # start_batch_workers), so a rapid-review click never has to queue
+        # up behind whatever the background pass is doing, and psycopg
         # connections aren't safe for concurrent use across threads anyway.
         self.rapid_conn = psycopg.connect(dsn, autocommit=True)
+        # Bus numbers some _batch_worker thread has already claimed, so a
+        # second worker's next_unscored_bus call doesn't pick the same one
+        # before the first has finished (and written to batch_progress).
+        self.batch_in_progress: set[str] = set()
+        # (bus, candidate) pairs skipped this session in the rapid-review
+        # flow -- unlike deny (permanent, scratch.vehicle_identity_batch_
+        # rejected), this is just "not right now", so /api/rapid/next
+        # excludes it in-memory without writing anything durable.
+        self.rapid_skipped: set[tuple[str, int]] = set()
         self.transformer = pyproj.Transformer.from_crs(
             "EPSG:4326", f"EPSG:{UTM_24S}", always_xy=True
         )
@@ -434,8 +523,17 @@ class IdentityStore:
         ).fetchone()
         return row[0] if row else None
 
-    def next_unscored_bus(self, conn: psycopg.Connection) -> str | None:
+    def next_unscored_bus(
+        self, conn: psycopg.Connection, *, also_exclude: set[str]
+    ) -> str | None:
         """Pick the not-yet-batch-scored bus with the fewest possibilities.
+
+        also_exclude is store.batch_in_progress, passed explicitly rather
+        than read directly so this stays a pure query given its inputs --
+        with several _batch_worker threads running concurrently, a bus
+        another thread has already claimed (mid-scoring, not yet written
+        to batch_progress) must also be skipped, or two threads would
+        redundantly score the same bus.
 
         Same fewest-possibilities-first ordering as next_bus (see its
         docstring), but scoped to scratch.vehicle_identity_batch_progress
@@ -495,6 +593,7 @@ class IdentityStore:
             AND a.vehicle_number NOT IN (
                 SELECT vehicle_number FROM scratch.vehicle_identity_batch_progress
             )
+            AND a.vehicle_number != ALL(%(also_exclude)s)
             ORDER BY
                 COALESCE(p.n_distinct, 0) = 0,
                 COALESCE(p.n_distinct, 999999) ASC,
@@ -502,7 +601,8 @@ class IdentityStore:
                 COALESCE(p.n_trials, 0) DESC,
                 a.vehicle_number
             LIMIT 1
-            """
+            """,
+            {"also_exclude": list(also_exclude)},
         ).fetchone()
         return row[0] if row else None
 
@@ -925,26 +1025,7 @@ class IdentityStore:
         self.prefetch_generation += 1
         generation = self.prefetch_generation
         trips = self.qualifying_trips(vehicle_number, self.conn)
-
-        by_line: dict[str, list[dict[str, Any]]] = {}
-        for trip in trips:
-            by_line.setdefault(trip["line_number"], []).append(trip)
-        for line_trips in by_line.values():
-            line_trips.sort(
-                key=lambda t: (
-                    t["_shape_length_m"],
-                    t["trip_closed_at"] - t["trip_opened_at"],
-                ),
-                reverse=True,
-            )
-        # round-robin across lines, most-trips-remaining line first so a
-        # line with a long tail doesn't get starved behind short ones
-        queues = sorted(by_line.values(), key=len, reverse=True)
-        interleaved: list[dict[str, Any]] = []
-        for i in range(max((len(q) for q in queues), default=0)):
-            interleaved.extend(q[i] for q in queues if i < len(q))
-
-        self.trip_list = interleaved
+        self.trip_list = _order_trips(trips)
         self.serve_index = 0
         self.trip_cache = {}
         self.model_tally = {}
@@ -1074,7 +1155,7 @@ def _prefetch_worker(generation: int) -> None:
 
 
 def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
-    """Score every trip for one bus and write its rapid-review candidates.
+    """Score up to MAX_BATCH_TRIPS_PER_BUS trips and write rapid candidates.
 
     Reuses _build_trip_payload per trip (same model-scoring path as
     interactive review) purely for its model_top_candidate_vehicle_id/
@@ -1083,12 +1164,33 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
     candidate you're actually reviewing in the rapid flow, so this doesn't
     have to store a giant ping blob per trip for every bus up front.
 
+    Capped, not exhaustive: a bus with hundreds of trips doesn't need all
+    of them scored to reveal a dominant winner (observed one bus resolve
+    to 379/1200, a clearly dominant ~32% share, that first became obvious
+    long before trip 1200) -- scoring capped-at-40, longest-GTFS-route-
+    first (_order_trips, same ordering interactive review uses) gets a
+    reliable read on most buses in a small fraction of the time a full
+    trip history would take, which is what actually gates how fast new
+    candidates reach the rapid queue.
+
     A candidate only earns a row if it was the model's own top pick (with
     probability >= MODEL_TALLY_MIN_PROB) on at least one trip -- same bar
-    _record_model_tally uses. Its up-to-4 best (highest-probability)
-    trips become the "instances" the rapid-review UI shows maps for.
+    _record_model_tally uses. Its winning trips are ranked FULL completeness
+    first (IDA_FULL/VOLTA_FULL over IDA_PARTIAL/VOLTA_PARTIAL, see
+    _completeness_rank) and by probability within the same rank -- a
+    PARTIAL trip is a worse thing to review on a map even at a higher raw
+    probability, since only part of the route is visible to judge by eye --
+    then reordered (not dropped) so distinct routes come first, see
+    _diversify_by_route: an AVL vehicle overwhelmingly runs one route all
+    day, so every winning trip is kept, just interleaved round-robin across
+    line_number, meaning a candidate with lots of evidence still has real
+    depth to page through even when most of it is the same route.
+    /api/rapid/next and /api/rapid/page render this pool a couple at a
+    time rather than all at once, since rendering means real shapes/pings
+    DB round trips per trip.
     """
-    trips = store.qualifying_trips(vehicle_number, conn, exclude_labeled=False)
+    all_trips = store.qualifying_trips(vehicle_number, conn, exclude_labeled=False)
+    trips = _order_trips(all_trips)[:MAX_BATCH_TRIPS_PER_BUS]
     per_candidate: dict[
         int, list[tuple[dict[str, Any], float, str | None, float | None]]
     ] = {}
@@ -1116,7 +1218,8 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
             {"vn": vehicle_number},
         )
         for vid, wins in per_candidate.items():
-            wins.sort(key=lambda w: w[1], reverse=True)
+            wins.sort(key=lambda w: (_completeness_rank(w[2]), -w[1]))
+            diversified = _diversify_by_route(wins)
             instances = [
                 {
                     "line_number": t["line_number"],
@@ -1129,7 +1232,7 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
                     "model_completeness": comp,
                     "model_completeness_probability": comp_p,
                 }
-                for t, p, comp, comp_p in wins[:4]
+                for t, p, comp, comp_p in diversified
             ]
             cur.execute(
                 """
@@ -1162,25 +1265,63 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
         )
 
 
+N_BATCH_WORKERS = 4
+_batch_lock = threading.Lock()
+
+
+def _claim_next_bus(conn: psycopg.Connection) -> str | None:
+    """Atomically pick and claim the next bus for this worker thread.
+
+    Holds _batch_lock only for the pick-and-mark-claimed step, not the
+    (slow) scoring itself, so N_BATCH_WORKERS threads querying and
+    claiming in quick succession never race each other onto the same bus.
+    """
+    with _batch_lock:
+        vehicle_number = store.next_unscored_bus(
+            conn, also_exclude=store.batch_in_progress
+        )
+        if vehicle_number is not None:
+            store.batch_in_progress.add(vehicle_number)
+        return vehicle_number
+
+
 def _batch_worker() -> None:
     """Continuously batch-score every not-yet-resolved bus in the background.
 
     Runs from app startup for as long as the app is up, entirely
     independent of the interactive review session (current_bus/
-    prefetch_generation) -- its own connection, its own progress tracking
-    (scratch.vehicle_identity_batch_progress), so it survives app restarts
-    and keeps working through the remaining pool whether or not anyone is
-    actively reviewing. Stops naturally once next_unscored_bus finds
-    nothing left.
+    prefetch_generation) -- its own connection (never shared with any
+    other thread, including other _batch_worker instances), its own
+    progress tracking (scratch.vehicle_identity_batch_progress) so it
+    survives app restarts and keeps working through the remaining pool
+    whether or not anyone is actively reviewing. Stops naturally once
+    _claim_next_bus finds nothing left.
+
+    N_BATCH_WORKERS of these run concurrently (see start_batch_workers) to
+    multiply throughput -- each trip is already a small, independent unit
+    of work (its own avl_pings query + vectorized scoring), so running
+    several buses' worth of that work in parallel scales reasonably rather
+    than fighting over one shared connection or thread.
     """
+    conn = psycopg.connect(DSN, autocommit=True)
     while True:
-        vehicle_number = store.next_unscored_bus(store.batch_conn)
+        vehicle_number = _claim_next_bus(conn)
         if vehicle_number is None:
             return
-        _batch_score_bus(vehicle_number, store.batch_conn)
+        try:
+            _batch_score_bus(vehicle_number, conn)
+        finally:
+            with _batch_lock:
+                store.batch_in_progress.discard(vehicle_number)
 
 
-threading.Thread(target=_batch_worker, daemon=True).start()
+def start_batch_workers() -> None:
+    """Launch N_BATCH_WORKERS background batch-scoring threads."""
+    for _ in range(N_BATCH_WORKERS):
+        threading.Thread(target=_batch_worker, daemon=True).start()
+
+
+start_batch_workers()
 
 
 def _speed_feature(
@@ -1590,28 +1731,90 @@ def _rapid_progress() -> dict[str, int]:
     }
 
 
+def _render_instances(
+    instances: list[dict[str, Any]], vid: int
+) -> list[dict[str, Any]]:
+    """Render shapes+pings maps for a slice of a candidate's stored instances.
+
+    Shared by /api/rapid/next (first page) and /api/rapid/page (every page
+    after) so both pay the same per-trip DB round trips (shapes_latlon_for,
+    single_candidate_pings) the same way, just for different slices of the
+    stored pool.
+    """
+    rendered = []
+    for inst in instances:
+        feed = date.fromisoformat(inst["resolved_feed_version_date"])
+        line = inst["line_number"]
+        shapes = store.shapes_latlon_for(feed, line, store.rapid_conn)
+        opened = datetime.fromisoformat(inst["trip_opened_at"])
+        closed = datetime.fromisoformat(inst["trip_closed_at"])
+        pings = store.single_candidate_pings(vid, opened, closed, store.rapid_conn)
+        rendered.append(
+            {
+                "line_number": line,
+                "trip_opened_at": inst["trip_opened_at"],
+                "trip_closed_at": inst["trip_closed_at"],
+                "model_valid_probability": inst["model_valid_probability"],
+                "model_completeness": inst.get("model_completeness"),
+                "model_completeness_probability": inst.get(
+                    "model_completeness_probability"
+                ),
+                "shapes": {
+                    shape_id: [{"lat": lat, "lon": lon} for lat, lon in pts]
+                    for shape_id, pts in shapes.items()
+                },
+                "pings": pings,
+            }
+        )
+    return rendered
+
+
 @app.get("/api/rapid/next")
 def api_rapid_next() -> JSONResponse:
-    """Return the single most-confident (bus, candidate) pair still open.
+    """Return the most-confident (bus, candidate) pair still open, unskipped.
 
-    "Most confident" is the GAP between this bus's best remaining candidate
+    Ranked FULL-completeness-first: a candidate whose single best stored
+    trip is IDA_FULL/VOLTA_FULL (instances is stored sorted that way, see
+    _batch_score_bus) is shown before one whose best trip is only PARTIAL,
+    since a PARTIAL trip is a weaker, less legible thing to judge on a map
+    even at a higher raw probability. Within that, ranked by the Wilson
+    score interval lower bound (95% CI, z=1.96 -- same formula as
+    _wilson_lower_bound, reimplemented in SQL here since it drives the
+    ORDER BY) of n_trips_as_top_pick out of n_trips_scored: a raw win share
+    overstates confidence at small n (2/2 looks identical to 30/40 by raw
+    percentage alone), so this is what actually keeps a bus with barely any
+    scored trips from outranking one with a large, mostly-agreeing sample --
+    "more data AND a higher win percentage," not either alone. Ties within
+    that are broken by the GAP between this bus's best remaining candidate
     and its best remaining runner-up (as a share of trips scored), not just
     the winner's own share in isolation -- a candidate winning 8/10 trips
     with a runner-up at 1/10 is far stronger, cleaner evidence than one
-    winning 8/20 against a runner-up at 7/20, even though the raw share
-    could come out similar. Already-rejected/claimed candidates are
-    excluded before computing who the "runner-up" even is, so a rejected
-    former #2 doesn't count against the gap.
+    winning 8/20 against a runner-up at 7/20, even at a similar Wilson
+    bound. Already-rejected/claimed candidates are excluded before
+    computing who the "runner-up" even is, so a rejected former #2 doesn't
+    count against the gap.
+
+    Fetches the top 50 by that ranking (not just 1) and returns the first
+    one not in store.rapid_skipped -- see /api/rapid/skip. Filtering happens
+    in Python rather than SQL since skipped is small, in-memory, per-session
+    state, not worth a NOT IN(...) over an array of composite pairs.
+
+    Only renders (shapes+pings) the first INSTANCES_PER_PAGE of the winning
+    candidate's stored instances -- /api/rapid/page renders more on demand,
+    since a candidate can have far more winning trips than are worth paying
+    the render cost for up front.
 
     Works with whatever _batch_worker has scored so far -- the queue simply
     grows as more buses get batch-scored in the background, and this
     always just picks the best of what's currently available rather than
     waiting for the whole pool to finish.
     """
-    row = store.rapid_conn.execute(
+    rows = store.rapid_conn.execute(
         """
         WITH eligible AS (
-            SELECT b.*
+            SELECT b.*,
+                   b.n_trips_as_top_pick::float
+                       / NULLIF(b.n_trips_scored, 0) AS phat
             FROM scratch.vehicle_identity_batch_scores b
             WHERE b.vehicle_number NOT IN (
                 SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
@@ -1640,7 +1843,21 @@ def api_rapid_next() -> JSONResponse:
                    ) AS rn,
                    LEAD(n_trips_as_top_pick, 1, 0) OVER (
                        PARTITION BY vehicle_number ORDER BY n_trips_as_top_pick DESC
-                   ) AS runner_up_top_picks
+                   ) AS runner_up_top_picks,
+                   -- Wilson score interval lower bound, 95% CI (z=1.96),
+                   -- same formula as _wilson_lower_bound() elsewhere in
+                   -- this app: corrects raw win share for sample size so
+                   -- e.g. 2/2 scored trips can't outrank 30/40.
+                   CASE WHEN n_trips_scored > 0 THEN
+                       GREATEST(0, (
+                           (phat + 1.96 ^ 2 / (2 * n_trips_scored)
+                               - 1.96 * sqrt(
+                                   phat * (1 - phat) / n_trips_scored
+                                   + 1.96 ^ 2 / (4 * n_trips_scored ^ 2)
+                               ))
+                           / (1 + 1.96 ^ 2 / n_trips_scored)
+                       ))
+                   ELSE 0 END AS wilson_lower
             FROM eligible
         )
         SELECT vehicle_number, candidate_vehicle_id, candidate_device_id,
@@ -1649,14 +1866,18 @@ def api_rapid_next() -> JSONResponse:
         FROM ranked
         WHERE rn = 1
         ORDER BY
+            (instances -> 0 ->> 'model_completeness')
+                IN ('IDA_FULL', 'VOLTA_FULL') DESC,
+            wilson_lower DESC,
             (n_trips_as_top_pick - runner_up_top_picks)::float
                 / NULLIF(n_trips_scored, 0) DESC,
             n_trips_as_top_pick DESC
-        LIMIT 1
+        LIMIT 50
         """
-    ).fetchone()
+    ).fetchall()
 
     progress = _rapid_progress()
+    row = next((r for r in rows if (r[0], r[1]) not in store.rapid_skipped), None)
     if row is None:
         return JSONResponse({"done": True, "progress": progress})
 
@@ -1670,31 +1891,7 @@ def api_rapid_next() -> JSONResponse:
         instances,
         runner_up_top_picks,
     ) = row
-    rendered_instances = []
-    for inst in instances:
-        feed = date.fromisoformat(inst["resolved_feed_version_date"])
-        line = inst["line_number"]
-        shapes = store.shapes_latlon_for(feed, line, store.rapid_conn)
-        opened = datetime.fromisoformat(inst["trip_opened_at"])
-        closed = datetime.fromisoformat(inst["trip_closed_at"])
-        pings = store.single_candidate_pings(vid, opened, closed, store.rapid_conn)
-        rendered_instances.append(
-            {
-                "line_number": line,
-                "trip_opened_at": inst["trip_opened_at"],
-                "trip_closed_at": inst["trip_closed_at"],
-                "model_valid_probability": inst["model_valid_probability"],
-                "model_completeness": inst.get("model_completeness"),
-                "model_completeness_probability": inst.get(
-                    "model_completeness_probability"
-                ),
-                "shapes": {
-                    shape_id: [{"lat": lat, "lon": lon} for lat, lon in pts]
-                    for shape_id, pts in shapes.items()
-                },
-                "pings": pings,
-            }
-        )
+    rendered_instances = _render_instances(instances[:INSTANCES_PER_PAGE], vid)
 
     return JSONResponse(
         {
@@ -1707,7 +1904,39 @@ def api_rapid_next() -> JSONResponse:
             "runner_up_top_picks": runner_up_top_picks,
             "avg_top_probability": round(avg_prob, 4) if avg_prob is not None else None,
             "instances": rendered_instances,
+            "total_instances": len(instances),
             "progress": progress,
+        }
+    )
+
+
+@app.get("/api/rapid/page")
+def api_rapid_page(
+    vehicle_number: str, candidate_vehicle_id: int, offset: int
+) -> JSONResponse:
+    """Render the next INSTANCES_PER_PAGE stored instances for one candidate.
+
+    Paging companion to /api/rapid/next's first page -- offset is how many
+    instances the caller has already seen (rapid.html tracks this as
+    shownCount). Looks the row back up by (vehicle_number,
+    candidate_vehicle_id) rather than trusting a client-held copy of
+    instances, since the underlying row could in principle have changed.
+    """
+    row = store.rapid_conn.execute(
+        """
+        SELECT instances FROM scratch.vehicle_identity_batch_scores
+        WHERE vehicle_number = %(vn)s AND candidate_vehicle_id = %(vid)s
+        """,
+        {"vn": vehicle_number, "vid": candidate_vehicle_id},
+    ).fetchone()
+    if row is None:
+        return JSONResponse({"instances": [], "total_instances": 0})
+    instances = row[0]
+    page = instances[offset : offset + INSTANCES_PER_PAGE]
+    return JSONResponse(
+        {
+            "instances": _render_instances(page, candidate_vehicle_id),
+            "total_instances": len(instances),
         }
     )
 
@@ -1742,6 +1971,28 @@ def api_rapid_deny(payload: RapidDenyIn) -> dict[str, Any]:
             "now": datetime.now(UTC),
         },
     )
+    return {"ok": True}
+
+
+class RapidSkipIn(BaseModel):
+    """An "I'm not sure" decision in the rapid review flow."""
+
+    vehicle_number: str
+    candidate_vehicle_id: int
+
+
+@app.post("/api/rapid/skip")
+def api_rapid_skip(payload: RapidSkipIn) -> dict[str, Any]:
+    """Set aside one (bus, candidate) pair for now, without judging it.
+
+    Unlike deny (permanent, scratch.vehicle_identity_batch_rejected), this
+    is "ambiguous, come back to it later" -- yes/no mean "definitely right"
+    /"definitely wrong"; skip is for anything in between. Recorded only in
+    store.rapid_skipped, an in-memory set that resets on app restart, so
+    /api/rapid/next simply offers it again on a later pass through the
+    queue instead of excluding it forever.
+    """
+    store.rapid_skipped.add((payload.vehicle_number, payload.candidate_vehicle_id))
     return {"ok": True}
 
 

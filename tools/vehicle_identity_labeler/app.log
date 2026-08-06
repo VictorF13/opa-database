@@ -1,0 +1,11 @@
+INFO:     Started server process [864741]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8012 (Press CTRL+C to quit)
+INFO:     100.105.59.121:65407 - "GET /rapid HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65407 - "GET /api/rapid/next HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65416 - "GET /api/rapid/page?vehicle_number=2342&candidate_vehicle_id=43216&offset=2 HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65417 - "GET /api/rapid/page?vehicle_number=2342&candidate_vehicle_id=43216&offset=4 HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65418 - "GET /api/rapid/page?vehicle_number=2342&candidate_vehicle_id=43216&offset=6 HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65419 - "GET /rapid HTTP/1.1" 200 OK
+INFO:     100.105.59.121:65419 - "GET /api/rapid/next HTTP/1.1" 200 OK

@@ -1,0 +1,44 @@
+waiting for find_candidates.py to finish generating batches...
+find_candidates.py has exited.
+
+=== running predict_trips.py ===
+loading models
+loading candidate batches
+  27946891 candidate rows across 37448 trips
+scoring qualifying candidates
+  37430 trips resolved via the model
+resolving sparse (no-signal) trips
+  18 trips auto-resolved as sparse/invalid
+  37448 total trips written (0 unaccounted for)
+writing scratch.trip_finder_predictions
+  37448 rows written
+shape: (4, 2)
+┌─────────────────────────┬───────┐
+│ trust_tier              ┆ count │
+│ ---                     ┆ ---   │
+│ str                     ┆ u32   │
+╞═════════════════════════╪═══════╡
+│ low_confidence_invalid  ┆ 1930  │
+│ high_confidence_invalid ┆ 4537  │
+│ high_confidence_valid   ┆ 27501 │
+│ low_confidence_valid    ┆ 3480  │
+└─────────────────────────┴───────┘
+
+=== running build_final_table.py ===
+building scratch.november_2023_trip_resolution
+
+resolution_source breakdown:
+  trip_labeler: 896579
+  trip_finder: 37448
+  unresolved: 6899
+
+trust_tier breakdown:
+  high_confidence_valid: 497886
+  high_confidence_invalid: 430731
+  None: 6899
+  low_confidence_valid: 3480
+  low_confidence_invalid: 1930
+
+total rows: 940926
+
+pipeline complete.

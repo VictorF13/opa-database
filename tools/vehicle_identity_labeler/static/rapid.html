@@ -42,6 +42,9 @@
            font-weight: 700; }
   #yes-btn { border-color: #16a34a; background: #16a34a; color: #fff; }
   #no-btn { border-color: #dc2626; background: #fff; color: #dc2626; }
+  #skip-btn { border-color: #9ca3af; background: #fff; color: #4b5563; }
+  #more-btn { margin: 4px auto 12px; display: block; border-color: #6366f1; background: #fff;
+              color: #6366f1; font-size: 13px; padding: 6px 16px; }
   #done { padding: 40px; text-align: center; font-size: 18px; color: #4b5563; }
   a.switch { color: #9ca3af; font-size: 12px; text-decoration: none; }
   a.switch:hover { text-decoration: underline; }
@@ -57,16 +60,19 @@
 <div id="card"></div>
 <div id="instances"></div>
 <div id="panel">
-  <button id="yes-btn">Yes, correct &nbsp;<kbd>Y</kbd></button>
-  <button id="no-btn">No, wrong &nbsp;<kbd>N</kbd></button>
-  <span>Confirming writes straight to the strong dictionary; denying shows this bus's next-best candidate, if any.</span>
+  <button id="yes-btn">Yes, definitely &nbsp;<kbd>Y</kbd></button>
+  <button id="no-btn">No, definitely not &nbsp;<kbd>N</kbd></button>
+  <button id="skip-btn">Skip, ambiguous &nbsp;<kbd>S</kbd></button>
+  <span>Yes writes straight to the strong dictionary; no shows this bus's next-best candidate, if any; skip just moves on for now.</span>
 </div>
 
 <script>
 const IDA_COLOR = "#2563eb";
 const VOLTA_COLOR = "#ea580c";
+const INSTANCES_PER_PAGE = 2;
 let current = null;
 let liveMaps = [];
+let shownCount = 0;
 
 function pct(v) { return v === null || v === undefined ? "-" : (v * 100).toFixed(0) + "%"; }
 function pingColor(i, n) {
@@ -145,15 +151,71 @@ function renderDone(p) {
     "or the background batch pass hasn't scored any more not-yet-rejected candidates yet. Check back shortly.</div>";
   document.getElementById("yes-btn").disabled = true;
   document.getElementById("no-btn").disabled = true;
+  document.getElementById("skip-btn").disabled = true;
+}
+
+function renderInstanceCard(inst, i, total) {
+  const idaShapeId = shapeIdFor(inst, "-I");
+  const voltaShapeId = shapeIdFor(inst, "-V");
+  const div = document.createElement("div");
+  div.className = "instance";
+  div.innerHTML = `
+    <div class="instance-head">
+      <b>trip ${i + 1}/${total}</b>
+      <span class="stat">line ${inst.line_number}</span>
+      <span class="stat">${new Date(inst.trip_opened_at).toLocaleString()} &rarr; ${new Date(inst.trip_closed_at).toLocaleTimeString()}</span>
+      <span class="stat">model valid ${pct(inst.model_valid_probability)}</span>
+      <span class="stat">${inst.model_completeness || "?"} (${pct(inst.model_completeness_probability)})</span>
+    </div>
+    <div class="maps">
+      <div class="map-wrap"><div class="map-title"><span style="color:${IDA_COLOR}">&#9679;</span> ida${idaShapeId ? "" : " (no shape)"}</div>
+        <div id="map-${i}-ida" class="map-box"></div></div>
+      <div class="map-wrap"><div class="map-title"><span style="color:${VOLTA_COLOR}">&#9679;</span> volta${voltaShapeId ? "" : " (no shape)"}</div>
+        <div id="map-${i}-volta" class="map-box"></div></div>
+    </div>`;
+  document.getElementById("instances").insertBefore(div, document.getElementById("more-btn"));
+  if (idaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-ida`, inst, idaShapeId, IDA_COLOR));
+  if (voltaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-volta`, inst, voltaShapeId, VOLTA_COLOR));
+}
+
+async function renderMoreInstances() {
+  if (!current) return;
+  const moreBtn = document.getElementById("more-btn");
+
+  // The initial /api/rapid/next payload only carries the first page --
+  // fetch more from the server once we've rendered everything on hand.
+  if (shownCount >= current.instances.length && shownCount < current.total_instances) {
+    moreBtn.disabled = true;
+    moreBtn.textContent = "Loading more trips...";
+    const params = new URLSearchParams({
+      vehicle_number: current.vehicle_number,
+      candidate_vehicle_id: current.candidate_vehicle_id,
+      offset: String(shownCount),
+    });
+    const res = await fetch(`/api/rapid/page?${params}`);
+    const data = await res.json();
+    current.instances = current.instances.concat(data.instances);
+    current.total_instances = data.total_instances;
+    moreBtn.disabled = false;
+  }
+
+  const total = current.total_instances;
+  const upTo = Math.min(shownCount + INSTANCES_PER_PAGE, current.instances.length);
+  for (let i = shownCount; i < upTo; i++) renderInstanceCard(current.instances[i], i, total);
+  shownCount = upTo;
+  moreBtn.style.display = shownCount < total ? "block" : "none";
+  moreBtn.textContent = `Show ${Math.min(INSTANCES_PER_PAGE, total - shownCount)} more trips (${shownCount}/${total} shown)`;
 }
 
 function render(data) {
   current = data;
   liveMaps.forEach((m) => m.remove());
   liveMaps = [];
+  shownCount = 0;
   renderProgress(data.progress);
   document.getElementById("yes-btn").disabled = false;
   document.getElementById("no-btn").disabled = false;
+  document.getElementById("skip-btn").disabled = false;
 
   const cls = confidenceClass(data.n_trips_scored ? data.n_trips_as_top_pick / data.n_trips_scored : null);
   const gap = data.n_trips_as_top_pick - (data.runner_up_top_picks || 0);
@@ -167,30 +229,9 @@ function render(data) {
     <span>avg probability ${pct(data.avg_top_probability)}</span>`;
 
   const container = document.getElementById("instances");
-  container.innerHTML = "";
-  data.instances.forEach((inst, i) => {
-    const idaShapeId = shapeIdFor(inst, "-I");
-    const voltaShapeId = shapeIdFor(inst, "-V");
-    const div = document.createElement("div");
-    div.className = "instance";
-    div.innerHTML = `
-      <div class="instance-head">
-        <b>trip ${i + 1}/${data.instances.length}</b>
-        <span class="stat">line ${inst.line_number}</span>
-        <span class="stat">${new Date(inst.trip_opened_at).toLocaleString()} &rarr; ${new Date(inst.trip_closed_at).toLocaleTimeString()}</span>
-        <span class="stat">model valid ${pct(inst.model_valid_probability)}</span>
-        <span class="stat">${inst.model_completeness || "?"} (${pct(inst.model_completeness_probability)})</span>
-      </div>
-      <div class="maps">
-        <div class="map-wrap"><div class="map-title"><span style="color:${IDA_COLOR}">&#9679;</span> ida${idaShapeId ? "" : " (no shape)"}</div>
-          <div id="map-${i}-ida" class="map-box"></div></div>
-        <div class="map-wrap"><div class="map-title"><span style="color:${VOLTA_COLOR}">&#9679;</span> volta${voltaShapeId ? "" : " (no shape)"}</div>
-          <div id="map-${i}-volta" class="map-box"></div></div>
-      </div>`;
-    container.appendChild(div);
-    if (idaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-ida`, inst, idaShapeId, IDA_COLOR));
-    if (voltaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-volta`, inst, voltaShapeId, VOLTA_COLOR));
-  });
+  container.innerHTML = '<button id="more-btn"></button>';
+  document.getElementById("more-btn").onclick = renderMoreInstances;
+  renderMoreInstances();
 }
 
 async function loadNext() {
@@ -230,11 +271,26 @@ async function deny() {
   loadNext();
 }
 
+async function skip() {
+  if (!current) return;
+  await fetch("/api/rapid/skip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vehicle_number: current.vehicle_number,
+      candidate_vehicle_id: current.candidate_vehicle_id,
+    }),
+  });
+  loadNext();
+}
+
 document.getElementById("yes-btn").onclick = confirm;
 document.getElementById("no-btn").onclick = deny;
+document.getElementById("skip-btn").onclick = skip;
 document.addEventListener("keydown", (e) => {
   if (e.key.toLowerCase() === "y") confirm();
   else if (e.key.toLowerCase() === "n") deny();
+  else if (e.key.toLowerCase() === "s") skip();
 });
 
 loadNext();
