@@ -1,15 +1,36 @@
-"""Manual, statistics-only labeler for buses build_vehicle_identity.py couldn't resolve.
+"""Manual labeler for buses build_vehicle_identity.py couldn't resolve.
 
-No machine learning anywhere in this app -- every ranking number shown is
-computed the same way tools/trip_finder/scoring.py already does for its own
-spot-check (distance-to-line, start/end proximity, progress correlation),
-reused directly here rather than reimplemented. The only thing this app adds
-is a human in the loop: for one bus number at a time, it shows one of that
-bus's real November trips (>=15 minutes, so there's enough GPS signal to
-judge from) plotted against its GTFS route, alongside every AVL vehicle_id
-active during that exact trip window, ranked by how well each one's own GPS
-track follows the route. You look at the map and decide which candidate (if
-any) is plausibly the real bus.
+For one bus number at a time, shows one of that bus's real November trips
+(>=15 minutes, so there's enough GPS signal to judge from) plotted against
+its GTFS route, alongside every AVL vehicle_id active during that exact
+trip window. You look at the map and decide which candidate (if any) is
+plausibly the real bus.
+
+Ranking uses trip_finder's own already-trained model (validity_model.joblib
+/ completeness_model.joblib in tools/trip_finder/model_store, loaded once
+at startup -- no training happens in this app, only inference), scored
+against EVERY active candidate in the window, not just a geometrically
+pre-filtered handful: filtering to "top 10 by raw distance" before scoring
+would silently exclude a candidate that only looks right once the model
+weighs distance, correlation, speed profile, and timing together -- the
+model can only rank what it's actually shown. The 23-feature vector matches
+tools/trip_finder/predict_trips.py's FEATURE_COLUMNS exactly (kept in sync
+by hand, not imported, same reasoning predict_trips.py itself gives for not
+importing from trip_finder/app.py); most of it comes for free from
+aggregate_trip_candidates (already computed for every candidate) or is
+cheap and cacheable per-route (iv_overlap_m, shape_start_end_dist_m) or
+per-trip (the speed-percentile lookup against
+scratch.trip_shape_samples_scored). Candidates already excluded from
+consideration in the original model's own training data (another confident
+trip claims them for an overlapping time window --
+scratch.trip_match_predictions' success intervals) are excluded here too,
+for consistency with what the model actually learned "candidate" to mean.
+
+The raw geometric stats (distance-to-line, start/end proximity, progress
+correlation -- same tools/trip_finder/scoring.py functions used for its own
+spot-check) are still shown alongside the model's probability, not
+replaced by it: the model ranks and pre-selects the top MAX_CANDIDATES_SHOWN,
+but you're still the one deciding, with both signals in front of you.
 
 This is the same "agreement across many trips" idea build_vehicle_identity.py
 already used on the *automatic* prediction sources, just extended to trips a
@@ -84,8 +105,9 @@ import threading
 import time
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import joblib
 import numpy as np
 import psycopg
 import pyproj
@@ -98,13 +120,58 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # find_candidates.py itself does `from scoring import ...` (sibling-style,
 # assuming its own directory is on sys.path, not tools/) -- add that too.
 sys.path.insert(0, str(Path(__file__).parent.parent / "trip_finder"))
-from trip_finder.find_candidates import aggregate_trip_candidates
-from trip_finder.scoring import UTM_24S, ShapeGeom, load_shapes, project_pings
+from trip_finder.find_candidates import (
+    aggregate_trip_candidates,
+    fetch_success_intervals,
+)
+from trip_finder.scoring import (
+    UTM_24S,
+    ShapeGeom,
+    iv_overlap_m,
+    load_shapes,
+    local_fortaleza,
+    project_pings,
+    shape_start_end_dist_m,
+)
+
+if TYPE_CHECKING:
+    from sklearn.ensemble import HistGradientBoostingClassifier
 
 DSN = "postgresql://opa:opa@localhost:5432/opa"
+MODEL_DIR = Path(__file__).parent.parent / "trip_finder" / "model_store"
 MIN_TRIP_MINUTES = 15
 MIN_PINGS_FOR_CANDIDATE = 3
 MAX_CANDIDATES_SHOWN = 10
+
+# Kept in sync by hand with tools/trip_finder/predict_trips.py's
+# FEATURE_COLUMNS -- same reasoning predict_trips.py itself documents for not
+# importing this from trip_finder/app.py: importing app.py would execute its
+# module-level `store = LabelStore(DSN)` and spin up that entire live app.
+FEATURE_COLUMNS = [
+    "n_pings_in_window",
+    "ida_avg_dist_to_line_m",
+    "ida_progress_corr",
+    "ida_start_proximity_m",
+    "ida_end_proximity_m",
+    "volta_avg_dist_to_line_m",
+    "volta_progress_corr",
+    "volta_start_proximity_m",
+    "volta_end_proximity_m",
+    "duration_sec",
+    "day_of_week",
+    "hour_of_trip_start",
+    "hour_of_trip_end",
+    "iv_overlap_m",
+    "ida_shape_start_end_dist_m",
+    "volta_shape_start_end_dist_m",
+    "ida_implied_speed_kmh",
+    "ida_speed_percentile",
+    "volta_implied_speed_kmh",
+    "volta_speed_percentile",
+    "total_distance_m",
+    "ping_timespan_sec",
+    "spatial_dispersion_m",
+]
 
 app = FastAPI()
 
@@ -149,6 +216,7 @@ class IdentityStore:
         self.shape_cache: dict[
             tuple[date, str], dict[tuple[date, str, str], ShapeGeom]
         ] = {}
+        self.route_feature_cache: dict[tuple[date, str], dict[str, float]] = {}
         self.current_bus: str | None = None
         self.skipped_this_session: set[str] = set()
         self.trip_list: list[dict[str, Any]] = []
@@ -157,6 +225,21 @@ class IdentityStore:
         self.prefetch_generation = 0
         self._ensure_schema()
         self.claimed_vehicle_ids = self._load_claimed_vehicle_ids()
+
+        self.validity_model: HistGradientBoostingClassifier = joblib.load(
+            MODEL_DIR / "validity_model.joblib"
+        )
+        completeness_path = MODEL_DIR / "completeness_model.joblib"
+        self.completeness_model: HistGradientBoostingClassifier | None = (
+            joblib.load(completeness_path) if completeness_path.exists() else None
+        )
+        # A vehicle_id already confidently claimed by ANOTHER trip during an
+        # overlapping time window can't also be this trip's candidate -- same
+        # exclusion find_candidates.py applies before generating training
+        # data, so the model was never shown these as valid options either.
+        self.succ_vehicle, self.succ_start, self.succ_end = fetch_success_intervals(
+            self.conn
+        )
 
     def _load_claimed_vehicle_ids(self) -> set[int]:
         """avl_vehicle_ids already confidently claimed by a DIFFERENT bus.
@@ -429,6 +512,51 @@ class IdentityStore:
             coords = json.loads(geojson)["coordinates"]
             out[shape_id] = [(lat, lon) for lon, lat in coords]
         return out
+
+    def route_features_for(
+        self,
+        feed_version_date: date,
+        line_number: str,
+        shapes: dict[tuple[date, str, str], ShapeGeom],
+    ) -> dict[str, float]:
+        """Cache iv_overlap_m/ida+volta_shape_start_end_dist_m per (feed, line).
+
+        These three model features describe the ROUTE, not any one trip or
+        candidate -- computed once per (feed, line) and reused for every
+        trip and every candidate that shares it, same caching discipline as
+        shape_cache.
+        """
+        key = (feed_version_date, line_number)
+        if key not in self.route_feature_cache:
+            overlap = iv_overlap_m(shapes)
+            start_end = shape_start_end_dist_m(shapes)
+            self.route_feature_cache[key] = {
+                "iv_overlap_m": overlap.get(key, np.nan),
+                "ida_shape_start_end_dist_m": start_end.get((*key, "I"), np.nan),
+                "volta_shape_start_end_dist_m": start_end.get((*key, "V"), np.nan),
+            }
+        return self.route_feature_cache[key]
+
+    def speed_ref_for_trip(
+        self, vehicle_number: str, trip_opened_at: datetime, conn: psycopg.Connection
+    ) -> dict[str, tuple[float, float]]:
+        """Return shape_id -> (implied_speed_kmh, speed_percentile) for one trip.
+
+        Per-trip, not per-candidate or bulk-preloaded -- a point lookup
+        against scratch.trip_shape_samples_scored's own
+        (vehicle_number, trip_opened_at) index, same reference distribution
+        find_candidates.py's fetch_speed_ref reads, just fetched one trip at
+        a time here instead of bulk-loaded for a fixed trip list up front.
+        """
+        rows = conn.execute(
+            """
+            SELECT shape_id, implied_speed_kmh, speed_percentile
+            FROM scratch.trip_shape_samples_scored
+            WHERE vehicle_number = %(vn)s AND trip_opened_at = %(to)s
+            """,
+            {"vn": vehicle_number, "to": trip_opened_at},
+        ).fetchall()
+        return {shape_id: (speed, pct) for shape_id, speed, pct in rows}
 
     def prior_evidence(
         self, vehicle_number: str, conn: psycopg.Connection
@@ -714,35 +842,57 @@ def _prefetch_worker(generation: int) -> None:
             store.trip_cache[_trip_key(trip)] = payload
 
 
-def _rank_candidates(
+def _speed_feature(
+    speed_ref: dict[str, tuple[float, float]],
+    shape: ShapeGeom | None,
+    duration_sec: float,
+) -> tuple[float, float]:
+    """(implied_speed_kmh, speed_percentile) for one trip/direction.
+
+    Same fallback find_candidates.py's _lookup_speed uses: a directly
+    computed implied speed (shape length / duration) with NaN percentile
+    when scratch.trip_shape_samples_scored has no precomputed row for this
+    trip (mostly trips resolved through the nearest-feed fallback).
+    """
+    if shape is None:
+        return np.nan, np.nan
+    speed, pct = speed_ref.get(shape.shape_id, (np.nan, np.nan))
+    if np.isnan(speed) and duration_sec > 0:
+        speed = shape.length_m / 1000 / (duration_sec / 3600)
+    return speed, pct
+
+
+def _score_all_candidates(
     trip: dict[str, Any],
     shapes: dict[tuple[Any, str, str], ShapeGeom],
     conn: psycopg.Connection,
-) -> list[dict[str, Any]]:
-    """Score every AVL vehicle active in the trip window and rank them.
+) -> tuple[list[dict[str, Any]], list[list[float]]]:
+    """Build the display dict and the model's feature row for every candidate.
 
-    Uses find_candidates.py's aggregate_trip_candidates (numpy/bincount,
-    grouped by vehicle_id) instead of calling scoring.compute_direction_metrics
-    once per candidate in a Python loop -- a trip window can have up to
-    ~1500 distinct active vehicles city-wide, and the per-candidate scalar
-    path was the actual bottleneck this function used to have.
-
-    Vehicles already claimed by a different, already-resolved bus
-    (store.claimed_vehicle_ids) are dropped before scoring -- they can't
-    also be this bus's real vehicle.
+    Split out of _rank_candidates purely to keep that function's statement
+    count down -- see _rank_candidates' own docstring for why every active
+    candidate is scored here rather than a geometrically pre-filtered subset.
     """
     raw = store.candidates_for_trip(
         trip["trip_opened_at"], trip["trip_closed_at"], conn
     )
+    t_open, t_close = trip["trip_opened_at"], trip["trip_closed_at"]
+    excluded_by_time = (store.succ_start < t_close.timestamp()) & (
+        store.succ_end > t_open.timestamp()
+    )
+    excluded_vehicles = set(store.succ_vehicle[excluded_by_time].tolist())
     raw = {
-        vid: entry for vid, entry in raw.items() if vid not in store.claimed_vehicle_ids
+        vid: entry
+        for vid, entry in raw.items()
+        if vid not in store.claimed_vehicle_ids and vid not in excluded_vehicles
     }
     prior = store.prior_evidence(trip["vehicle_number"], conn)
-    shape_i = shapes.get((trip["resolved_feed_version_date"], trip["line_number"], "I"))
-    shape_v = shapes.get((trip["resolved_feed_version_date"], trip["line_number"], "V"))
+    feed, line = trip["resolved_feed_version_date"], trip["line_number"]
+    shape_i = shapes.get((feed, line, "I"))
+    shape_v = shapes.get((feed, line, "V"))
 
     if not raw:
-        return []
+        return [], []
 
     vehicle_ids: list[int] = []
     lons: list[float] = []
@@ -760,7 +910,17 @@ def _rank_candidates(
         np.array(vehicle_ids, dtype=np.int64), np.array(epochs), x, y, shape_i, shape_v
     )
 
+    # trip/route-level features: identical for every candidate on this trip,
+    # computed once rather than per candidate
+    duration_sec = (t_close - t_open).total_seconds()
+    local_open, local_close = local_fortaleza(t_open), local_fortaleza(t_close)
+    route_feats = store.route_features_for(feed, line, shapes)
+    speed_ref = store.speed_ref_for_trip(trip["vehicle_number"], t_open, conn)
+    ida_speed, ida_pct = _speed_feature(speed_ref, shape_i, duration_sec)
+    volta_speed, volta_pct = _speed_feature(speed_ref, shape_v, duration_sec)
+
     scored: list[dict[str, Any]] = []
+    feature_rows: list[list[float]] = []
     for i, vehicle_id_np in enumerate(agg["vehicle_id"]):
         vehicle_id = int(vehicle_id_np)
         n = int(agg["n_pings_in_window"][i])
@@ -769,6 +929,12 @@ def _rank_candidates(
 
         ida_dist = float(agg["ida_avg_dist_to_line_m"][i])
         volta_dist = float(agg["volta_avg_dist_to_line_m"][i])
+        ida_corr = float(agg["ida_progress_corr"][i])
+        ida_start = float(agg["ida_start_proximity_m"][i])
+        ida_end = float(agg["ida_end_proximity_m"][i])
+        volta_corr = float(agg["volta_progress_corr"][i])
+        volta_start = float(agg["volta_start_proximity_m"][i])
+        volta_end = float(agg["volta_end_proximity_m"][i])
         dists = [d for d in (ida_dist, volta_dist) if not np.isnan(d)]
         best_dist = min(dists) if dists else None
         best_direction = "I" if dists and best_dist == ida_dist else None
@@ -786,17 +952,15 @@ def _rank_candidates(
                 "best_direction": best_direction,
                 "ida": {
                     "avg_dist_to_line_m": _clean(ida_dist),
-                    "progress_corr": _clean(float(agg["ida_progress_corr"][i])),
-                    "start_proximity_m": _clean(float(agg["ida_start_proximity_m"][i])),
-                    "end_proximity_m": _clean(float(agg["ida_end_proximity_m"][i])),
+                    "progress_corr": _clean(ida_corr),
+                    "start_proximity_m": _clean(ida_start),
+                    "end_proximity_m": _clean(ida_end),
                 },
                 "volta": {
                     "avg_dist_to_line_m": _clean(volta_dist),
-                    "progress_corr": _clean(float(agg["volta_progress_corr"][i])),
-                    "start_proximity_m": _clean(
-                        float(agg["volta_start_proximity_m"][i])
-                    ),
-                    "end_proximity_m": _clean(float(agg["volta_end_proximity_m"][i])),
+                    "progress_corr": _clean(volta_corr),
+                    "start_proximity_m": _clean(volta_start),
+                    "end_proximity_m": _clean(volta_end),
                 },
                 "prior_evidence_trips": prior.get(vehicle_id, 0),
                 "pings": [
@@ -805,16 +969,89 @@ def _rank_candidates(
                 ],
             }
         )
-
-    # rank by geometric closeness, but always surface anything with prior
-    # automatic evidence even if its live geometry ranks it lower
-    scored.sort(
-        key=lambda c: (
-            c["prior_evidence_trips"] == 0,
-            c["best_avg_dist_to_line_m"]
-            if c["best_avg_dist_to_line_m"] is not None
-            else float("inf"),
+        feature_rows.append(
+            [
+                n,
+                ida_dist,
+                ida_corr,
+                ida_start,
+                ida_end,
+                volta_dist,
+                volta_corr,
+                volta_start,
+                volta_end,
+                duration_sec,
+                local_open.weekday(),
+                local_open.hour,
+                local_close.hour,
+                route_feats["iv_overlap_m"],
+                route_feats["ida_shape_start_end_dist_m"],
+                route_feats["volta_shape_start_end_dist_m"],
+                ida_speed,
+                ida_pct,
+                volta_speed,
+                volta_pct,
+                float(agg["total_distance_m"][i]),
+                float(agg["ping_timespan_sec"][i]),
+                float(agg["spatial_dispersion_m"][i]),
+            ]
         )
+    return scored, feature_rows
+
+
+def _rank_candidates(
+    trip: dict[str, Any],
+    shapes: dict[tuple[Any, str, str], ShapeGeom],
+    conn: psycopg.Connection,
+) -> list[dict[str, Any]]:
+    """Score EVERY AVL vehicle active in the trip window with the model.
+
+    Uses find_candidates.py's aggregate_trip_candidates (numpy/bincount,
+    grouped by vehicle_id) instead of calling scoring.compute_direction_metrics
+    once per candidate in a Python loop -- a trip window can have up to
+    ~1500 distinct active vehicles city-wide. Deliberately doesn't pre-filter
+    to a geometrically-plausible handful before scoring: aggregate_trip_
+    candidates already computes stats for everyone regardless, so an early
+    filter would only silently exclude a candidate that looks better once
+    the model weighs distance, correlation, speed, and timing together.
+
+    Two exclusions applied before scoring (see _score_all_candidates), both
+    because the model was never shown these as valid options during its own
+    training either: store.claimed_vehicle_ids (already confirmed as a
+    DIFFERENT bus's real identity this month) and store.succ_* (a confident
+    OTHER trip claims this vehicle_id during an overlapping time window,
+    find_candidates.py's own exclusion).
+    """
+    scored, feature_rows = _score_all_candidates(trip, shapes, conn)
+    if not scored:
+        return []
+
+    x_matrix = np.array(feature_rows, dtype=np.float64)
+    p_valid = store.validity_model.predict_proba(x_matrix)[:, 1]
+    completeness_pred: np.ndarray | None = None
+    completeness_prob: np.ndarray | None = None
+    if store.completeness_model is not None:
+        proba = store.completeness_model.predict_proba(x_matrix)
+        classes = store.completeness_model.classes_
+        best_i = proba.argmax(axis=1)
+        completeness_pred = classes[best_i]
+        completeness_prob = proba[np.arange(len(proba)), best_i]
+
+    for j, c in enumerate(scored):
+        c["model_valid_probability"] = round(float(p_valid[j]), 4)
+        c["model_completeness"] = (
+            str(completeness_pred[j]) if completeness_pred is not None else None
+        )
+        c["model_completeness_probability"] = (
+            round(float(completeness_prob[j]), 4)
+            if completeness_prob is not None
+            else None
+        )
+
+    # prior automatic evidence is always surfaced even if the model ranks it
+    # lower; everything else ranks strictly by the model's own probability
+    scored.sort(
+        key=lambda c: (c["prior_evidence_trips"] == 0, -c["model_valid_probability"])
     )
     forced = [c for c in scored if c["prior_evidence_trips"] > 0]
     rest = [c for c in scored if c["prior_evidence_trips"] == 0]

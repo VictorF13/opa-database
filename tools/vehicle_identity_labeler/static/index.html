@@ -224,6 +224,9 @@ function candidateCard(cand, i) {
   const priorTag = cand.prior_evidence_trips > 0
     ? `<span class="prior-tag">prior evidence &times;${cand.prior_evidence_trips}</span>` : "";
   const dirStats = cand.best_direction === "V" ? cand.volta : cand.ida;
+  const modelCls = confidenceClass(cand.model_valid_probability);
+  const modelCompleteness = cand.model_completeness
+    ? ` &rarr; ${cand.model_completeness} (${pct(cand.model_completeness_probability)})` : "";
 
   const idaShapeId = shapeIdFor("-I");
   const voltaShapeId = shapeIdFor("-V");
@@ -235,8 +238,9 @@ function candidateCard(cand, i) {
       <b>vehicle_id ${cand.candidate_vehicle_id}</b>
       <span class="stat">device ${cand.candidate_device_id || "?"}</span>
       ${priorTag}
+      <span class="conf-tag ${modelCls}">model ${pct(cand.model_valid_probability)}${modelCompleteness}</span>
       <span class="conf-tag ${cls}">
-        confidence floor ${pct(conf.confidence_lower_bound)} (raw ${pct(conf.agreement_pct)}, n=${conf.total_trials ?? 0})
+        your confidence floor ${pct(conf.confidence_lower_bound)} (raw ${pct(conf.agreement_pct)}, n=${conf.total_trials ?? 0})
       </span>
       <span class="stat">pings ${cand.n_pings_in_window}</span>
       <span class="stat">dist ${fmt(cand.best_avg_dist_to_line_m)}m</span>
