@@ -19,7 +19,7 @@ display, and writing/reading rows in the new scratch.trip_finder_labels
 table. Does not touch scratch.trip_match_labels, any trip_labeler model file,
 or any gold table.
 
-Three cascaded models, same shared 20-feature vector:
+Three cascaded models, same shared 23-feature vector:
   - validity model: did this candidate vehicle actually run this trip, in
     some form? (target: decision in the 5 MATCH_DECISIONS, trained on every
     label)
@@ -655,6 +655,7 @@ class LabelStore:
         self.holdout_n: int | None = None
         self.n_labels = self._count_labels()
         self._labeled_keys: set[tuple[Any, ...]] = set()
+        self._trained_keys: set[tuple[Any, ...]] = set()
         self._load_training_history()
         self._restore_or_train()
         self._refill()
@@ -688,7 +689,19 @@ class LabelStore:
         return row[0] if row else 0
 
     def _load_training_history(self) -> None:
-        """Rebuild self.examples from scratch.trip_finder_labels on startup."""
+        """Sync self.examples with scratch.trip_finder_labels.
+
+        Safe to call repeatedly (called at startup AND on every _refill,
+        not just once) -- only ever turns a label into a training example
+        the first time its (trip, candidate) row is actually present in
+        self.data.df, tracked via _trained_keys so it's never double-added.
+        This matters specifically because find_candidates.py can still be
+        regenerating batches in the background: a label submitted for a
+        trip whose batch hadn't landed yet at startup would otherwise sit
+        in Postgres forever, correctly excluded from the pool (via
+        _labeled_keys, updated unconditionally below) but silently never
+        used to train anything until the app was restarted.
+        """
         rows = self.conn.execute(
             """
             SELECT vehicle_number, line_number, trip_opened_at, trip_closed_at,
@@ -710,16 +723,24 @@ class LabelStore:
             },
             orient="row",
         )
-        joined = labels_df.join(self.data.df, on=NATURAL_KEY_COLUMNS, how="inner")
-        if len(joined) < len(labels_df):
-            missing = len(labels_df) - len(joined)
-            print(
-                f"  {missing} labels reference rows not in the loaded batches, skipped"
+        self._labeled_keys |= set(labels_df.select(NATURAL_KEY_COLUMNS).rows())
+
+        trained = self._trained_keys
+        key_exprs = [pl.col(c) for c in NATURAL_KEY_COLUMNS]
+        not_yet_trained = labels_df.filter(
+            pl.struct(key_exprs).map_elements(
+                lambda s: tuple(s.values()) not in trained, return_dtype=pl.Boolean
             )
+        )
+        if len(not_yet_trained) == 0:
+            return
+        joined = not_yet_trained.join(self.data.df, on=NATURAL_KEY_COLUMNS, how="inner")
+        if len(joined) == 0:
+            return
         x = _feature_matrix(joined)
         for i, decision in enumerate(joined["decision"].to_list()):
             self.examples.append(_build_example(list(x[i]), decision))
-        self._labeled_keys = set(labels_df.select(NATURAL_KEY_COLUMNS).rows())
+        self._trained_keys |= set(joined.select(NATURAL_KEY_COLUMNS).rows())
 
     def _restore_or_train(self) -> None:
         if self._try_load_saved_models():
@@ -1006,6 +1027,7 @@ class LabelStore:
             surfacing a class the model has already learned to dismiss.
         """
         self.data.refresh()
+        self._load_training_history()
         self._recompute_coverage()
         pool_df = self._top_k_per_trip(TOP_K_PER_TRIP)
         if len(pool_df) == 0:
@@ -1075,6 +1097,7 @@ class LabelStore:
             ):
                 x = list(_feature_matrix(pl.DataFrame([self.current]))[0])
                 self.examples.append(_build_example(x, payload.decision))
+                self._trained_keys.add(key)
                 self.current = None
 
             if self._maybe_retrain():
