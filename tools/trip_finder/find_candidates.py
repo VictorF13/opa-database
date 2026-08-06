@@ -337,6 +337,13 @@ def aggregate_trip_candidates(
             var_t = st2 / n - (st / n) ** 2
             var_f = sf2 / n - (sf / n) ** 2
             corr = cov / np.sqrt(var_t * var_f)
+        # This raw-moment formula is less numerically stable than
+        # np.corrcoef (scoring.compute_direction_metrics's path), and can
+        # push a true +-1.0 correlation a hair outside the mathematically
+        # valid [-1, 1] range in low-n edge cases -- caught by
+        # find_candidates.py's own spot_check disagreeing with the scalar
+        # path (e.g. -1.0005383...). Clip back to the valid range.
+        corr = np.clip(corr, -1.0, 1.0)
         corr = np.where(
             (counts >= MIN_PINGS_FOR_CORR) & (var_t > 0) & (var_f > 0), corr, np.nan
         )
