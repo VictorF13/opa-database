@@ -436,6 +436,14 @@ class IdentityStore:
         running background pass (_batch_worker), not the interactive
         per-session queue, so "already handled" needs to persist across
         restarts rather than reset each session.
+
+        Also tiebreaks on fewest November trips (ascending), between the
+        possibilities-count tier and the trials tiebreak: a bus with a
+        genuinely huge trip count is usually a shared/generic AFC code
+        rather than one real physical bus (observed one with ~1200 trips
+        in a single month), and batch-scoring it takes proportionally
+        long -- this keeps the worker moving through many normal-sized
+        buses instead of stalling on one pathological one first.
         """
         row = conn.execute(
             """
@@ -461,8 +469,12 @@ class IdentityStore:
                 GROUP BY vehicle_number
             ),
             all_buses AS (
-                SELECT DISTINCT vehicle_number FROM silver.afc_boardings
+                SELECT vehicle_number,
+                       count(DISTINCT (line_number, trip_opened_at, trip_closed_at))
+                           AS n_trips
+                FROM silver.afc_boardings
                 WHERE trip_opened_at >= '2023-11-01' AND trip_opened_at < '2023-12-01'
+                GROUP BY vehicle_number
             )
             SELECT a.vehicle_number
             FROM all_buses a
@@ -479,6 +491,7 @@ class IdentityStore:
             ORDER BY
                 COALESCE(p.n_distinct, 0) = 0,
                 COALESCE(p.n_distinct, 999999) ASC,
+                a.n_trips ASC,
                 COALESCE(p.n_trials, 0) DESC,
                 a.vehicle_number
             LIMIT 1
@@ -975,6 +988,10 @@ def _build_trip_payload(
         "candidates": candidates,
         "model_top_candidate_vehicle_id": top_pick[0] if top_pick else None,
         "model_top_candidate_probability": round(top_pick[1], 4) if top_pick else None,
+        "model_top_candidate_completeness": top_pick[2] if top_pick else None,
+        "model_top_candidate_completeness_probability": top_pick[3]
+        if top_pick
+        else None,
     }
 
 
@@ -1065,14 +1082,23 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
     trips become the "instances" the rapid-review UI shows maps for.
     """
     trips = store.qualifying_trips(vehicle_number, conn, exclude_labeled=False)
-    per_candidate: dict[int, list[tuple[dict[str, Any], float]]] = {}
+    per_candidate: dict[
+        int, list[tuple[dict[str, Any], float, str | None, float | None]]
+    ] = {}
     for trip in trips:
         payload = _build_trip_payload(trip, conn)
         vid = payload["model_top_candidate_vehicle_id"]
         prob = payload["model_top_candidate_probability"]
         if vid is None or prob is None or prob < MODEL_TALLY_MIN_PROB:
             continue
-        per_candidate.setdefault(vid, []).append((trip, prob))
+        per_candidate.setdefault(vid, []).append(
+            (
+                trip,
+                prob,
+                payload["model_top_candidate_completeness"],
+                payload["model_top_candidate_completeness_probability"],
+            )
+        )
 
     now = datetime.now(UTC)
     device_ids = store.device_ids_for(list(per_candidate.keys()))
@@ -1093,8 +1119,10 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
                         "resolved_feed_version_date"
                     ].isoformat(),
                     "model_valid_probability": round(p, 4),
+                    "model_completeness": comp,
+                    "model_completeness_probability": comp_p,
                 }
-                for t, p in wins[:4]
+                for t, p, comp, comp_p in wins[:4]
             ]
             cur.execute(
                 """
@@ -1111,7 +1139,7 @@ def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
                     "did": device_ids.get(vid),
                     "nts": len(trips),
                     "ntp": len(wins),
-                    "avg": sum(p for _, p in wins) / len(wins),
+                    "avg": sum(p for _, p, _, _ in wins) / len(wins),
                     "inst": json.dumps(instances),
                     "now": now,
                 },
@@ -1309,7 +1337,7 @@ def _rank_candidates(
     trip: dict[str, Any],
     shapes: dict[tuple[Any, str, str], ShapeGeom],
     conn: psycopg.Connection,
-) -> tuple[list[dict[str, Any]], tuple[int, float] | None]:
+) -> tuple[list[dict[str, Any]], tuple[int, float, str | None, float | None] | None]:
     """Score EVERY AVL vehicle active in the trip window with the model.
 
     Uses find_candidates.py's aggregate_trip_candidates (numpy/bincount,
@@ -1365,7 +1393,12 @@ def _rank_candidates(
     # forced/truncated candidate list could otherwise hide the model's real
     # #1 choice for this trip
     top_j = int(np.argmax(p_valid))
-    top_pick = (scored[top_j]["candidate_vehicle_id"], float(p_valid[top_j]))
+    top_pick = (
+        scored[top_j]["candidate_vehicle_id"],
+        float(p_valid[top_j]),
+        scored[top_j]["model_completeness"],
+        scored[top_j]["model_completeness_probability"],
+    )
 
     # prior automatic evidence is always surfaced even if the model ranks it
     # lower; everything else ranks strictly by the model's own probability
@@ -1554,8 +1587,15 @@ def _rapid_progress() -> dict[str, int]:
 def api_rapid_next() -> JSONResponse:
     """Return the single most-confident (bus, candidate) pair still open.
 
-    "Most confident" = highest share of this bus's scored trips where the
-    model's own top pick was this candidate, tie-broken by raw trip count.
+    "Most confident" is the GAP between this bus's best remaining candidate
+    and its best remaining runner-up (as a share of trips scored), not just
+    the winner's own share in isolation -- a candidate winning 8/10 trips
+    with a runner-up at 1/10 is far stronger, cleaner evidence than one
+    winning 8/20 against a runner-up at 7/20, even though the raw share
+    could come out similar. Already-rejected/claimed candidates are
+    excluded before computing who the "runner-up" even is, so a rejected
+    former #2 doesn't count against the gap.
+
     Works with whatever _batch_worker has scored so far -- the queue simply
     grows as more buses get batch-scored in the background, and this
     always just picks the best of what's currently available rather than
@@ -1563,32 +1603,48 @@ def api_rapid_next() -> JSONResponse:
     """
     row = store.batch_conn.execute(
         """
-        SELECT b.vehicle_number, b.candidate_vehicle_id, b.candidate_device_id,
-               b.n_trips_scored, b.n_trips_as_top_pick, b.avg_top_probability,
-               b.instances
-        FROM scratch.vehicle_identity_batch_scores b
-        WHERE b.vehicle_number NOT IN (
-            SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
+        WITH eligible AS (
+            SELECT b.*
+            FROM scratch.vehicle_identity_batch_scores b
+            WHERE b.vehicle_number NOT IN (
+                SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
+            )
+            AND b.vehicle_number NOT IN (
+                SELECT vehicle_number FROM scratch.vehicle_identity_confirmed
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM scratch.vehicle_identity_batch_rejected r
+                WHERE r.vehicle_number = b.vehicle_number
+                  AND r.candidate_vehicle_id = b.candidate_vehicle_id
+            )
+            AND b.candidate_vehicle_id NOT IN (
+                SELECT avl_vehicle_id FROM scratch.november_2023_vehicle_identity
+                WHERE avl_vehicle_id IS NOT NULL
+            )
+            AND b.candidate_vehicle_id NOT IN (
+                SELECT avl_vehicle_id FROM scratch.vehicle_identity_confirmed
+                WHERE avl_vehicle_id IS NOT NULL
+            )
+        ),
+        ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY vehicle_number ORDER BY n_trips_as_top_pick DESC
+                   ) AS rn,
+                   LEAD(n_trips_as_top_pick, 1, 0) OVER (
+                       PARTITION BY vehicle_number ORDER BY n_trips_as_top_pick DESC
+                   ) AS runner_up_top_picks
+            FROM eligible
         )
-        AND b.vehicle_number NOT IN (
-            SELECT vehicle_number FROM scratch.vehicle_identity_confirmed
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM scratch.vehicle_identity_batch_rejected r
-            WHERE r.vehicle_number = b.vehicle_number
-              AND r.candidate_vehicle_id = b.candidate_vehicle_id
-        )
-        AND b.candidate_vehicle_id NOT IN (
-            SELECT avl_vehicle_id FROM scratch.november_2023_vehicle_identity
-            WHERE avl_vehicle_id IS NOT NULL
-        )
-        AND b.candidate_vehicle_id NOT IN (
-            SELECT avl_vehicle_id FROM scratch.vehicle_identity_confirmed
-            WHERE avl_vehicle_id IS NOT NULL
-        )
+        SELECT vehicle_number, candidate_vehicle_id, candidate_device_id,
+               n_trips_scored, n_trips_as_top_pick, avg_top_probability,
+               instances, runner_up_top_picks
+        FROM ranked
+        WHERE rn = 1
         ORDER BY
-            (b.n_trips_as_top_pick::float / NULLIF(b.n_trips_scored, 0)) DESC,
-            b.n_trips_as_top_pick DESC
+            (n_trips_as_top_pick - runner_up_top_picks)::float
+                / NULLIF(n_trips_scored, 0) DESC,
+            n_trips_as_top_pick DESC
         LIMIT 1
         """
     ).fetchone()
@@ -1597,7 +1653,16 @@ def api_rapid_next() -> JSONResponse:
     if row is None:
         return JSONResponse({"done": True, "progress": progress})
 
-    vehicle_number, vid, device_id, n_scored, n_top, avg_prob, instances = row
+    (
+        vehicle_number,
+        vid,
+        device_id,
+        n_scored,
+        n_top,
+        avg_prob,
+        instances,
+        runner_up_top_picks,
+    ) = row
     rendered_instances = []
     for inst in instances:
         feed = date.fromisoformat(inst["resolved_feed_version_date"])
@@ -1612,6 +1677,10 @@ def api_rapid_next() -> JSONResponse:
                 "trip_opened_at": inst["trip_opened_at"],
                 "trip_closed_at": inst["trip_closed_at"],
                 "model_valid_probability": inst["model_valid_probability"],
+                "model_completeness": inst.get("model_completeness"),
+                "model_completeness_probability": inst.get(
+                    "model_completeness_probability"
+                ),
                 "shapes": {
                     shape_id: [{"lat": lat, "lon": lon} for lat, lon in pts]
                     for shape_id, pts in shapes.items()
@@ -1628,6 +1697,7 @@ def api_rapid_next() -> JSONResponse:
             "candidate_device_id": device_id,
             "n_trips_scored": n_scored,
             "n_trips_as_top_pick": n_top,
+            "runner_up_top_picks": runner_up_top_picks,
             "avg_top_probability": round(avg_prob, 4) if avg_prob is not None else None,
             "instances": rendered_instances,
             "progress": progress,

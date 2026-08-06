@@ -156,11 +156,14 @@ function render(data) {
   document.getElementById("no-btn").disabled = false;
 
   const cls = confidenceClass(data.n_trips_scored ? data.n_trips_as_top_pick / data.n_trips_scored : null);
+  const gap = data.n_trips_as_top_pick - (data.runner_up_top_picks || 0);
   document.getElementById("card").innerHTML = `
     <span>Bus <b>${data.vehicle_number}</b> &rarr; vehicle_id <b>${data.candidate_vehicle_id}</b>
       (device ${data.candidate_device_id || "?"})</span>
     <span class="conf-tag ${cls}">${data.n_trips_as_top_pick}/${data.n_trips_scored} trips
       (${pct(data.n_trips_scored ? data.n_trips_as_top_pick / data.n_trips_scored : null)})</span>
+    <span>runner-up won ${data.runner_up_top_picks || 0} &mdash; gap ${gap}
+      (${pct(data.n_trips_scored ? gap / data.n_trips_scored : null)})</span>
     <span>avg probability ${pct(data.avg_top_probability)}</span>`;
 
   const container = document.getElementById("instances");
@@ -175,7 +178,8 @@ function render(data) {
         <b>trip ${i + 1}/${data.instances.length}</b>
         <span class="stat">line ${inst.line_number}</span>
         <span class="stat">${new Date(inst.trip_opened_at).toLocaleString()} &rarr; ${new Date(inst.trip_closed_at).toLocaleTimeString()}</span>
-        <span class="stat">model ${pct(inst.model_valid_probability)}</span>
+        <span class="stat">model valid ${pct(inst.model_valid_probability)}</span>
+        <span class="stat">${inst.model_completeness || "?"} (${pct(inst.model_completeness_probability)})</span>
       </div>
       <div class="maps">
         <div class="map-wrap"><div class="map-title"><span style="color:${IDA_COLOR}">&#9679;</span> ida${idaShapeId ? "" : " (no shape)"}</div>
