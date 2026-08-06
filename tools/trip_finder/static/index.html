@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Trip finder labeler</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; display: flex; flex-direction: column;
+         height: 100vh; background: #ffffff; color: #111827; }
+  header { padding: 8px 16px; background: #111827; color: #f3f4f6; display: flex; gap: 20px; align-items: center;
+           font-size: 13px; flex-wrap: wrap; }
+  header b { color: #fff; }
+  #coverage { font-weight: 700; color: #34d399; }
+  #maps { flex: 1; min-height: 0; display: flex; gap: 6px; padding: 6px; background: #e5e7eb; }
+  .map-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; border-radius: 6px;
+              overflow: hidden; border: 1px solid #d1d5db; }
+  .map-title { padding: 4px 10px; font-size: 12px; font-weight: 600; background: #f3f4f6; color: #111827;
+               border-bottom: 1px solid #d1d5db; }
+  .map-box { flex: 1; }
+  .leaflet-tile-pane { filter: grayscale(45%) brightness(1.08); }
+  .label-tip { font-weight: 700; font-size: 11px; background: #111827 !important; color: #fff !important;
+               border: none !important; box-shadow: none !important; padding: 2px 6px !important; }
+  .label-tip::before { display: none !important; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  #panel { padding: 10px 16px; border-top: 1px solid #d1d5db; background: #fff; }
+  #model-pred { font-size: 13px; padding: 4px 16px; background: #eef2ff; color: #111827; border-bottom: 1px solid #d1d5db; }
+  #features { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
+  #features table { border-collapse: collapse; }
+  #features td { padding: 1px 6px 1px 0; white-space: nowrap; }
+  #features td.v { text-align: right; font-variant-numeric: tabular-nums; }
+  #features .col-title { font-weight: 700; margin-bottom: 2px; }
+  #actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font-size: 14px; padding: 8px 14px; border-radius: 6px; border: 1px solid #9ca3af; cursor: pointer;
+           background: #f9fafb; color: #111827; }
+  button.match { border-color: #2563eb; }
+  button.invalid { border-color: #dc2626; }
+  button.notroute { border-color: #d97706; }
+  button:hover { filter: brightness(0.95); }
+  kbd { background: #e5e7eb; border-radius: 3px; padding: 0 5px; font-size: 12px; color: #111827; }
+</style>
+</head>
+<body>
+<header>
+  <span>Labeled: <b id="stat-labels">0</b></span>
+  <span>Pool: <b id="stat-pool">0</b></span>
+  <span>Batches loaded: <b id="stat-batches">0</b></span>
+  <span>Coverage: <b id="coverage">0%</b> (<span id="coverage-detail">0/0</span>)</span>
+  <span>Model: <b id="stat-model">cold start (random order)</b></span>
+  <span>Holdout: <b id="stat-holdout">n/a</b></span>
+  <span id="win-info"></span>
+</header>
+<div id="model-pred"></div>
+<div id="maps"></div>
+<div id="panel">
+  <div id="features"></div>
+  <div id="actions"></div>
+</div>
+
+<script>
+const IDA_COLOR = "#2563eb";   // blue
+const VOLTA_COLOR = "#ea580c"; // orange
+let maps = [];
+let current = null;
+
+function fmt(v, digits = 1) {
+  if (v === null || v === undefined) return "-";
+  return Number(v).toFixed(digits);
+}
+
+function pingColor(i, n) {
+  const t = n <= 1 ? 0 : i / (n - 1);
+  const v = Math.round(255 * (1 - t)); // white (early) -> black (late)
+  return `rgb(${v},${v},${v})`;
+}
+
+function squareIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:14px;height:14px;background:${color};border:2px solid #111;"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+function drawDirectionMap(divId, cand, shapeId, color) {
+  const map = L.map(divId, { zoomControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, opacity: 0.45, attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+
+  const bounds = [];
+  const path = cand.shapes[shapeId];
+
+  // route first, so it sits underneath the candidate's actual GPS trace;
+  // START/END mark the ROUTE's own endpoints (not the candidate's first/last
+  // ping) -- that's what actually lets you judge FULL vs PARTIAL coverage.
+  if (path && path.length) {
+    const latlngs = path.map((p) => [p.lat, p.lon]);
+    L.polyline(latlngs, { color, weight: 7, opacity: 0.85 }).addTo(map);
+    const startLL = latlngs[0];
+    const endLL = latlngs[latlngs.length - 1];
+    L.circleMarker(startLL, { radius: 10, color: "#0a3", weight: 2, fillColor: "#16a34a", fillOpacity: 1 })
+      .bindTooltip("START", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    L.marker(endLL, { icon: squareIcon("#dc2626") })
+      .bindTooltip("END", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    bounds.push(startLL, endLL, ...latlngs);
+  }
+
+  // candidate's own ping trace, drawn last so it renders above the route
+  const n = cand.pings.length;
+  let prev = null;
+  cand.pings.forEach((p, i) => {
+    const ll = [p.lat, p.lon];
+    bounds.push(ll);
+    if (prev) L.polyline([prev, ll], { color: "#374151", weight: 1.5, opacity: 0.7 }).addTo(map);
+    L.circleMarker(ll, { radius: 4, color: "#111", weight: 0.8, fillColor: pingColor(i, n), fillOpacity: 1 }).addTo(map);
+    prev = ll;
+  });
+
+  requestAnimationFrame(() => {
+    map.invalidateSize();
+    if (bounds.length) map.fitBounds(bounds, { padding: [24, 24] });
+    else map.setView([-3.73, -38.53], 12);
+  });
+  return map;
+}
+
+function shapeIdFor(cand, suffix) {
+  return Object.keys(cand.shapes).find((sid) => sid.endsWith(suffix));
+}
+
+function render(cand) {
+  current = cand;
+  maps.forEach((m) => m.remove());
+  maps = [];
+
+  const idaShapeId = shapeIdFor(cand, "-I");
+  const voltaShapeId = shapeIdFor(cand, "-V");
+  const mapsDiv = document.getElementById("maps");
+  mapsDiv.innerHTML = `
+    <div class="map-wrap"><div class="map-title"><span class="swatch" style="background:${IDA_COLOR}"></span> ida${idaShapeId ? " — " + idaShapeId : " (no shape this feed)"}</div><div id="map-ida" class="map-box"></div></div>
+    <div class="map-wrap"><div class="map-title"><span class="swatch" style="background:${VOLTA_COLOR}"></span> volta${voltaShapeId ? " — " + voltaShapeId : " (no shape this feed)"}</div><div id="map-volta" class="map-box"></div></div>`;
+  // map divs must exist in the DOM before Leaflet can size them
+  if (idaShapeId) maps.push(drawDirectionMap("map-ida", cand, idaShapeId, IDA_COLOR));
+  if (voltaShapeId) maps.push(drawDirectionMap("map-volta", cand, voltaShapeId, VOLTA_COLOR));
+
+  document.getElementById("win-info").textContent =
+    `line ${cand.line_number} (AFC bus ${cand.vehicle_number}) | candidate vehicle_id ${cand.candidate_vehicle_id} | ` +
+    `${cand.trip_opened_at.replace("T", " ")} -> ${cand.trip_closed_at.replace("T", " ")} | ${cand.pings.length} pings`;
+
+  document.getElementById("model-pred").innerHTML = renderModelPrediction(cand.model_prediction);
+
+  const f = cand.features;
+  document.getElementById("features").innerHTML = `
+    <div>
+      <div class="col-title" style="color:${IDA_COLOR}">ida</div>
+      <table>
+        <tr><td>avg dist to line</td><td class="v">${fmt(f.ida_avg_dist_to_line_m)} m</td></tr>
+        <tr><td>progress corr</td><td class="v">${fmt(f.ida_progress_corr, 3)}</td></tr>
+        <tr><td>start proximity</td><td class="v">${fmt(f.ida_start_proximity_m)} m</td></tr>
+        <tr><td>end proximity</td><td class="v">${fmt(f.ida_end_proximity_m)} m</td></tr>
+        <tr><td>implied speed</td><td class="v">${fmt(f.ida_implied_speed_kmh)} km/h</td></tr>
+        <tr><td>speed percentile</td><td class="v">${fmt(f.ida_speed_percentile, 3)}</td></tr>
+        <tr><td>shape start-end dist</td><td class="v">${fmt(f.ida_shape_start_end_dist_m)} m</td></tr>
+      </table>
+    </div>
+    <div>
+      <div class="col-title" style="color:${VOLTA_COLOR}">volta</div>
+      <table>
+        <tr><td>avg dist to line</td><td class="v">${fmt(f.volta_avg_dist_to_line_m)} m</td></tr>
+        <tr><td>progress corr</td><td class="v">${fmt(f.volta_progress_corr, 3)}</td></tr>
+        <tr><td>start proximity</td><td class="v">${fmt(f.volta_start_proximity_m)} m</td></tr>
+        <tr><td>end proximity</td><td class="v">${fmt(f.volta_end_proximity_m)} m</td></tr>
+        <tr><td>implied speed</td><td class="v">${fmt(f.volta_implied_speed_kmh)} km/h</td></tr>
+        <tr><td>speed percentile</td><td class="v">${fmt(f.volta_speed_percentile, 3)}</td></tr>
+        <tr><td>shape start-end dist</td><td class="v">${fmt(f.volta_shape_start_end_dist_m)} m</td></tr>
+      </table>
+    </div>
+    <div>
+      <div class="col-title">trip</div>
+      <table>
+        <tr><td>n pings in window</td><td class="v">${f.n_pings_in_window ?? "-"}</td></tr>
+        <tr><td>duration</td><td class="v">${fmt(f.duration_sec, 0)} s</td></tr>
+        <tr><td>day of week</td><td class="v">${f.day_of_week ?? "-"}</td></tr>
+        <tr><td>hour start / end</td><td class="v">${f.hour_of_trip_start ?? "-"} / ${f.hour_of_trip_end ?? "-"}</td></tr>
+        <tr><td>ida/volta overlap</td><td class="v">${fmt(f.iv_overlap_m)} m</td></tr>
+      </table>
+    </div>
+    <div>
+      <div class="col-title">candidate movement</div>
+      <table>
+        <tr><td>total distance traveled</td><td class="v">${fmt(f.total_distance_m, 0)} m</td></tr>
+        <tr><td>ping timespan</td><td class="v">${fmt(f.ping_timespan_sec, 0)} s</td></tr>
+        <tr><td>spatial dispersion</td><td class="v">${fmt(f.spatial_dispersion_m, 0)} m</td></tr>
+      </table>
+    </div>`;
+
+  const actions = document.getElementById("actions");
+  actions.innerHTML = "";
+  const buttons = [
+    ["1", "IDA_FULL", "match", "IDA (full route)"],
+    ["2", "IDA_PARTIAL", "match", "IDA (partial)"],
+    ["3", "VOLTA_FULL", "match", "VOLTA (full route)"],
+    ["4", "VOLTA_PARTIAL", "match", "VOLTA (partial)"],
+    ["5", "BOTH", "match", "BOTH directions / full cycle"],
+    ["6", "DIFFERENT_ROUTE", "notroute", "DIFFERENT ROUTE"],
+    ["7", "INVALID", "invalid", "INVALID"],
+  ];
+  buttons.forEach(([key, decision, cls, label]) => {
+    const btn = document.createElement("button");
+    btn.className = cls;
+    btn.innerHTML = `[${key}] ${label} <kbd>${key}</kbd>`;
+    btn.onclick = () => submit(decision);
+    actions.appendChild(btn);
+  });
+
+  updateStats(cand.stats);
+}
+
+function updateStats(stats) {
+  document.getElementById("stat-labels").textContent = stats.n_labels;
+  document.getElementById("stat-pool").textContent = stats.pool_size;
+  document.getElementById("stat-batches").textContent = stats.n_batches_loaded;
+  document.getElementById("coverage").textContent =
+    stats.coverage_pct === null || stats.coverage_pct === undefined ? "n/a" : `${stats.coverage_pct}%`;
+  document.getElementById("coverage-detail").textContent = `${stats.n_confident}/${stats.n_trips_loaded}`;
+
+  if (!stats.validity_trained) {
+    document.getElementById("stat-model").textContent = `cold start (${stats.n_training_examples}/20 to activate)`;
+  } else {
+    const acc = stats.cv_accuracy === null || stats.cv_accuracy === undefined
+      ? "n/a (too little data yet for a nested estimate)"
+      : `${(stats.cv_accuracy * 100).toFixed(0)}% (nested, measured @ n=${stats.cv_accuracy_n})`;
+    const models = [
+      "valid",
+      stats.completeness_trained ? "completeness" : null,
+      stats.reason_trained ? "reason" : null,
+    ].filter(Boolean).join("+");
+    document.getElementById("stat-model").textContent = `active (${models}, n=${stats.n_training_examples}, cascade cv acc ${acc})`;
+  }
+
+  const fmtPct = (v) => (v === null || v === undefined ? "n/a" : `${(v * 100).toFixed(0)}%`);
+  if (stats.holdout_n === null || stats.holdout_n === undefined) {
+    document.getElementById("stat-holdout").textContent = "n/a";
+  } else {
+    document.getElementById("stat-holdout").textContent =
+      `validity ${fmtPct(stats.validity_holdout_accuracy)} / completeness ${fmtPct(stats.completeness_holdout_accuracy)} / reason ${fmtPct(stats.reason_holdout_accuracy)} (@ n=${stats.holdout_n})`;
+  }
+}
+
+function renderModelPrediction(mp) {
+  if (!mp || !mp.validity) return "Model: not trained yet (need 20+ labels with both outcomes seen).";
+  const v = mp.validity;
+  const vPct = (v.valid_probability * 100).toFixed(0);
+  let text = `Model 1 (validity): predicts <b>${v.predicted_valid ? "MATCH" : "NOT MATCH"}</b> (${vPct}% confidence)`;
+  if (mp.completeness) {
+    const c = mp.completeness;
+    text += ` &nbsp;|&nbsp; Model 2 (completeness): predicts <b>${c.predicted_completeness}</b> (${(c.predicted_probability * 100).toFixed(0)}% confidence)`;
+  } else if (v.predicted_valid) {
+    text += ` &nbsp;|&nbsp; Model 2 (completeness): not trained yet`;
+  }
+  if (mp.reason) {
+    const r = mp.reason;
+    text += ` &nbsp;|&nbsp; Model 3 (reason): predicts <b>${r.predicted_reason}</b> (${(r.predicted_probability * 100).toFixed(0)}% confidence)`;
+  } else if (!v.predicted_valid) {
+    text += ` &nbsp;|&nbsp; Model 3 (reason): not trained yet`;
+  }
+  return text;
+}
+
+async function loadNext() {
+  document.getElementById("win-info").textContent = "loading...";
+  const res = await fetch("/api/next");
+  if (!res.ok) {
+    document.getElementById("win-info").textContent = "pool exhausted (or no batches generated yet)";
+    return;
+  }
+  const cand = await res.json();
+  render(cand);
+}
+
+async function submit(decision) {
+  if (!current) return;
+  const body = {
+    vehicle_number: current.vehicle_number,
+    line_number: current.line_number,
+    trip_opened_at: current.trip_opened_at,
+    trip_closed_at: current.trip_closed_at,
+    candidate_vehicle_id: current.candidate_vehicle_id,
+    decision,
+  };
+  await fetch("/api/label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  loadNext();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (!current) return;
+  const map = { "1": "IDA_FULL", "2": "IDA_PARTIAL", "3": "VOLTA_FULL", "4": "VOLTA_PARTIAL",
+                "5": "BOTH", "6": "DIFFERENT_ROUTE", "7": "INVALID" };
+  if (map[e.key]) submit(map[e.key]);
+});
+
+loadNext();
+</script>
+</body>
+</html>
