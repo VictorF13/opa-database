@@ -837,6 +837,17 @@ def _combined_confidence(
     selected it. This is the exact same agreement ratio
     build_vehicle_identity.py computes from automatic evidence alone,
     generalized to include your labels too.
+
+    total_trials/agreement_pct/confidence_lower_bound are computed over
+    EVERY trial, including ones that happened to point at a candidate that
+    has since become claimed elsewhere (the 73% dictionary or a
+    confirmation) -- that's real evidence that really happened, and
+    silently dropping it from the denominator would inflate the remaining
+    candidates' numbers. Only the returned candidate SET is filtered to
+    currently-unclaimed ones (store.claimed_vehicle_ids), since a claimed
+    vehicle_id can't be a live possibility for a different, still-open bus
+    anymore -- matching the same exclusion _rank_candidates already applies
+    to the live per-trip candidate list.
     """
     automatic = store.prior_evidence(vehicle_number, store.conn)
     automatic_total = sum(automatic.values())
@@ -845,6 +856,8 @@ def _combined_confidence(
 
     out: dict[int, dict[str, Any]] = {}
     for vid in candidate_ids | automatic.keys() | manual_selected.keys():
+        if vid in store.claimed_vehicle_ids:
+            continue
         wins = automatic.get(vid, 0) + manual_selected.get(vid, 0)
         out[vid] = {
             "automatic_trips": automatic.get(vid, 0),
