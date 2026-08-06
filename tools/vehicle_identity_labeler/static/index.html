@@ -8,24 +8,39 @@
 <style>
   :root { color-scheme: light; }
   body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; display: flex; flex-direction: column;
-         height: 100vh; background: #ffffff; color: #111827; }
+         height: 100vh; background: #f3f4f6; color: #111827; }
   header { padding: 8px 16px; background: #111827; color: #f3f4f6; display: flex; gap: 20px; align-items: center;
            font-size: 13px; flex-wrap: wrap; }
   header b { color: #fff; }
-  #main { flex: 1; min-height: 0; display: flex; }
-  #map { flex: 1; min-width: 0; }
-  #side { width: 320px; flex: none; border-left: 1px solid #d1d5db; overflow-y: auto; background: #f9fafb; }
-  .tally { padding: 8px 12px; background: #eef2ff; border-bottom: 1px solid #d1d5db; font-size: 12px; }
-  .tally .row { display: flex; justify-content: space-between; padding: 2px 0; }
-  .cand { padding: 8px 12px; border-bottom: 1px solid #e5e7eb; font-size: 12px; cursor: pointer; }
-  .cand:hover { background: #f3f4f6; }
-  .cand.selected { background: #dbeafe; }
-  .cand-head { display: flex; align-items: center; gap: 6px; font-weight: 700; }
-  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  .cand-stats { color: #4b5563; margin-top: 2px; }
-  .cand-stats span { display: inline-block; margin-right: 10px; }
-  .prior-tag { display: inline-block; background: #fde68a; color: #92400e; border-radius: 4px; padding: 0 5px;
-               font-size: 10px; font-weight: 700; margin-left: 4px; }
+  #tally { padding: 6px 16px; background: #eef2ff; border-bottom: 1px solid #c7d2fe; font-size: 12px;
+           display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #tally .chip { background: #fff; border: 1px solid #c7d2fe; border-radius: 12px; padding: 2px 10px; }
+  #cards { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: #fff; border: 2px solid #d1d5db; border-radius: 8px; overflow: hidden; cursor: pointer; }
+  .card.selected { border-color: #2563eb; box-shadow: 0 0 0 2px #bfdbfe; }
+  .card-head { padding: 6px 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+               background: #f9fafb; border-bottom: 1px solid #e5e7eb; font-size: 12px; }
+  .card-head b { font-size: 13px; }
+  .rank { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+          border-radius: 50%; background: #111827; color: #fff; font-size: 11px; font-weight: 700; }
+  .prior-tag { background: #fde68a; color: #92400e; border-radius: 4px; padding: 0 5px; font-size: 10px;
+               font-weight: 700; }
+  .conf-tag { border-radius: 4px; padding: 1px 7px; font-size: 11px; font-weight: 700; }
+  .conf-high { background: #bbf7d0; color: #065f46; }
+  .conf-mid { background: #fde68a; color: #92400e; }
+  .conf-low { background: #e5e7eb; color: #4b5563; }
+  .stat { color: #4b5563; }
+  .checkbox { width: 16px; height: 16px; }
+  .maps { display: flex; height: 260px; }
+  .map-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid #e5e7eb; }
+  .map-wrap:last-child { border-right: none; }
+  .map-title { padding: 3px 10px; font-size: 11px; font-weight: 600; background: #f3f4f6; color: #111827; }
+  .map-box { flex: 1; }
+  .leaflet-tile-pane { filter: grayscale(45%) brightness(1.08); }
+  .label-tip { font-weight: 700; font-size: 10px; background: #111827 !important; color: #fff !important;
+               border: none !important; box-shadow: none !important; padding: 1px 5px !important; }
+  .label-tip::before { display: none !important; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
   #panel { padding: 10px 16px; border-top: 1px solid #d1d5db; background: #fff; display: flex;
            gap: 8px; align-items: center; flex-wrap: wrap; }
   button { font-size: 14px; padding: 8px 14px; border-radius: 6px; border: 1px solid #9ca3af; cursor: pointer;
@@ -46,136 +61,175 @@
   <span>Feed: <b id="feed">-</b></span>
   <span id="win-info"></span>
 </header>
-<div id="main">
-  <div id="map"></div>
-  <div id="side">
-    <div class="tally" id="tally"></div>
-    <div id="candidates"></div>
-  </div>
-</div>
+<div id="tally"></div>
+<div id="cards"></div>
 <div id="panel">
   <button class="primary" id="submit-btn">Submit selection</button>
   <button id="none-btn">None match (skip)</button>
   <button class="warn" id="next-bus-btn">Next bus &rarr;</button>
-  <span>Click a candidate to toggle it, or use <kbd>1</kbd>-<kbd>9</kbd>, then <kbd>Enter</kbd> to submit,
+  <span>Click a card to toggle it, or use <kbd>1</kbd>-<kbd>9</kbd>, then <kbd>Enter</kbd> to submit,
     <kbd>N</kbd> for none, <kbd>B</kbd> for next bus.</span>
 </div>
 
 <script>
 const IDA_COLOR = "#2563eb";
 const VOLTA_COLOR = "#ea580c";
-const CAND_COLORS = ["#16a34a", "#dc2626", "#9333ea", "#0891b2", "#ca8a04",
-                      "#db2777", "#65a30d", "#4f46e5", "#0d9488", "#c2410c"];
 
-let map = null;
-let layers = [];
 let current = null;
 let selected = new Set();
+let liveMaps = [];
 
 function fmt(v, digits = 1) {
   if (v === null || v === undefined) return "-";
   return Number(v).toFixed(digits);
 }
-
-function clearMap() {
-  layers.forEach((l) => map.removeLayer(l));
-  layers = [];
+function pct(v) {
+  if (v === null || v === undefined) return "-";
+  return (v * 100).toFixed(0) + "%";
 }
 
-function drawShape(shapeId, color, label) {
-  const path = current.shapes[shapeId];
-  if (!path || !path.length) return [];
-  const latlngs = path.map((p) => [p.lat, p.lon]);
-  const line = L.polyline(latlngs, { color, weight: 6, opacity: 0.55 }).addTo(map);
-  layers.push(line);
-  const start = L.circleMarker(latlngs[0], { radius: 8, color: "#065f46", weight: 2,
-    fillColor: "#16a34a", fillOpacity: 1 })
-    .bindTooltip(label + " START", { permanent: false }).addTo(map);
-  const end = L.circleMarker(latlngs[latlngs.length - 1], { radius: 8, color: "#7f1d1d", weight: 2,
-    fillColor: "#dc2626", fillOpacity: 1 })
-    .bindTooltip(label + " END", { permanent: false }).addTo(map);
-  layers.push(start, end);
-  return latlngs;
+// early (white) -> late (black), same convention as trip_finder's own map
+function pingColor(i, n) {
+  const t = n <= 1 ? 0 : i / (n - 1);
+  const v = Math.round(255 * (1 - t));
+  return `rgb(${v},${v},${v})`;
 }
 
-function drawCandidate(cand, color, idx) {
-  const latlngs = cand.pings.map((p) => [p.lat, p.lon]);
-  let prev = null;
-  latlngs.forEach((ll) => {
-    if (prev) layers.push(L.polyline([prev, ll], { color, weight: 3, opacity: 0.9 }).addTo(map));
-    prev = ll;
+function squareIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:12px;height:12px;background:${color};border:2px solid #111;"></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
   });
-  latlngs.forEach((ll, i) => {
-    const marker = L.circleMarker(ll, { radius: i === 0 || i === latlngs.length - 1 ? 6 : 3.5,
-      color: "#111", weight: 0.7, fillColor: color, fillOpacity: 1 })
-      .bindTooltip(`#${idx + 1} vehicle_id ${cand.candidate_vehicle_id}`, { permanent: false });
-    marker.addTo(map);
-    layers.push(marker);
-  });
-  return latlngs;
 }
 
-function renderMap() {
-  clearMap();
-  let bounds = [];
-  bounds = bounds.concat(drawShape(shapeIdFor("-I"), IDA_COLOR, "IDA"));
-  bounds = bounds.concat(drawShape(shapeIdFor("-V"), VOLTA_COLOR, "VOLTA"));
-  current.candidates.forEach((cand, i) => {
-    const color = CAND_COLORS[i % CAND_COLORS.length];
-    bounds = bounds.concat(drawCandidate(cand, color, i));
-  });
-  requestAnimationFrame(() => {
-    map.invalidateSize();
-    if (bounds.length) map.fitBounds(bounds, { padding: [24, 24] });
-    else map.setView([-3.73, -38.53], 12);
-  });
+function confidenceClass(lb) {
+  if (lb === null || lb === undefined) return "conf-low";
+  if (lb >= 0.7) return "conf-high";
+  if (lb >= 0.3) return "conf-mid";
+  return "conf-low";
 }
 
 function shapeIdFor(suffix) {
   return Object.keys(current.shapes).find((sid) => sid.endsWith(suffix));
 }
 
-function renderTally(tally) {
-  const el = document.getElementById("tally");
-  if (!tally.candidates.length) {
-    el.innerHTML = `<div>${tally.n_trips_labeled} trip(s) reviewed for this bus so far. No candidate selected yet.</div>`;
-    return;
+// Same drawing logic as trip_finder/static/index.html's drawDirectionMap:
+// route first (drawn underneath), GTFS START/END permanently labeled from
+// the route's own endpoints (not the candidate's pings), then the
+// candidate's own ping trace on top, colored white(early)->black(late).
+function drawDirectionMap(divId, cand, shapeId, color, label) {
+  const map = L.map(divId, { zoomControl: false, attributionControl: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, opacity: 0.45,
+  }).addTo(map);
+
+  const bounds = [];
+  const path = current.shapes[shapeId];
+
+  if (path && path.length) {
+    const latlngs = path.map((p) => [p.lat, p.lon]);
+    L.polyline(latlngs, { color, weight: 6, opacity: 0.8 }).addTo(map);
+    const startLL = latlngs[0];
+    const endLL = latlngs[latlngs.length - 1];
+    L.circleMarker(startLL, { radius: 8, color: "#0a3", weight: 2, fillColor: "#16a34a", fillOpacity: 1 })
+      .bindTooltip("START", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    L.marker(endLL, { icon: squareIcon("#dc2626") })
+      .bindTooltip("END", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    bounds.push(startLL, endLL, ...latlngs);
   }
-  const rows = tally.candidates.map((c) =>
-    `<div class="row"><span>vehicle_id ${c.candidate_vehicle_id} (${c.candidate_device_id || "?"})</span>
-     <span>${c.n_selected}/${tally.n_trips_labeled}</span></div>`
-  ).join("");
-  el.innerHTML = `<div><b>${tally.n_trips_labeled}</b> trip(s) reviewed for this bus:</div>${rows}`;
+
+  const n = cand.pings.length;
+  let prev = null;
+  cand.pings.forEach((p, i) => {
+    const ll = [p.lat, p.lon];
+    bounds.push(ll);
+    if (prev) L.polyline([prev, ll], { color: "#374151", weight: 1.2, opacity: 0.6 }).addTo(map);
+    L.circleMarker(ll, { radius: 3.5, color: "#111", weight: 0.6, fillColor: pingColor(i, n), fillOpacity: 1 })
+      .addTo(map);
+    prev = ll;
+  });
+
+  requestAnimationFrame(() => {
+    map.invalidateSize();
+    if (bounds.length) map.fitBounds(bounds, { padding: [16, 16] });
+    else map.setView([-3.73, -38.53], 12);
+  });
+  return map;
 }
 
-function renderCandidates() {
-  const el = document.getElementById("candidates");
-  el.innerHTML = "";
+function renderTally(tally) {
+  const el = document.getElementById("tally");
+  const chips = tally.candidates.map((c) => {
+    const cls = confidenceClass(c.confidence_lower_bound);
+    return `<span class="chip"><b>vid ${c.candidate_vehicle_id}</b>
+      &nbsp;<span class="conf-tag ${cls}">${pct(c.confidence_lower_bound)} floor / ${pct(c.agreement_pct)} raw</span>
+      &nbsp;(${c.automatic_trips} auto + ${c.manual_selected_trips}/${tally.n_trips_labeled} manual, n=${c.total_trials})</span>`;
+  }).join("");
+  const more = tally.n_candidates_with_evidence > tally.candidates.length
+    ? `<span class="stat">(+${tally.n_candidates_with_evidence - tally.candidates.length} more with weaker evidence)</span>`
+    : "";
+  el.innerHTML =
+    `<span><b>${tally.n_trips_labeled}</b> trip(s) reviewed for this bus</span>${chips}${more}`;
+}
+
+function candidateCard(cand, i) {
+  const div = document.createElement("div");
+  div.className = "card" + (selected.has(i) ? " selected" : "");
+  const conf = cand.confidence || {};
+  const cls = confidenceClass(conf.confidence_lower_bound);
+  const priorTag = cand.prior_evidence_trips > 0
+    ? `<span class="prior-tag">prior evidence &times;${cand.prior_evidence_trips}</span>` : "";
+  const dirStats = cand.best_direction === "V" ? cand.volta : cand.ida;
+
+  const idaShapeId = shapeIdFor("-I");
+  const voltaShapeId = shapeIdFor("-V");
+
+  div.innerHTML = `
+    <div class="card-head">
+      <input type="checkbox" class="checkbox" ${selected.has(i) ? "checked" : ""} />
+      <span class="rank">${i + 1}</span>
+      <b>vehicle_id ${cand.candidate_vehicle_id}</b>
+      <span class="stat">device ${cand.candidate_device_id || "?"}</span>
+      ${priorTag}
+      <span class="conf-tag ${cls}">
+        confidence floor ${pct(conf.confidence_lower_bound)} (raw ${pct(conf.agreement_pct)}, n=${conf.total_trials ?? 0})
+      </span>
+      <span class="stat">pings ${cand.n_pings_in_window}</span>
+      <span class="stat">dist ${fmt(cand.best_avg_dist_to_line_m)}m</span>
+      <span class="stat">dir ${cand.best_direction || "?"}</span>
+      <span class="stat">corr ${fmt(dirStats ? dirStats.progress_corr : null, 2)}</span>
+    </div>
+    <div class="maps">
+      <div class="map-wrap"><div class="map-title"><span class="swatch" style="background:${IDA_COLOR}"></span>
+        ida${idaShapeId ? "" : " (no shape)"}</div><div id="map-${i}-ida" class="map-box"></div></div>
+      <div class="map-wrap"><div class="map-title"><span class="swatch" style="background:${VOLTA_COLOR}"></span>
+        volta${voltaShapeId ? "" : " (no shape)"}</div><div id="map-${i}-volta" class="map-box"></div></div>
+    </div>`;
+  div.onclick = (e) => {
+    if (e.target.tagName !== "INPUT") toggle(i);
+  };
+  div.querySelector(".checkbox").onclick = () => toggle(i);
+  return { div, idaShapeId, voltaShapeId };
+}
+
+function renderCards() {
+  liveMaps.forEach((m) => m.remove());
+  liveMaps = [];
+  const container = document.getElementById("cards");
+  container.innerHTML = "";
   current.candidates.forEach((cand, i) => {
-    const color = CAND_COLORS[i % CAND_COLORS.length];
-    const div = document.createElement("div");
-    div.className = "cand" + (selected.has(i) ? " selected" : "");
-    const priorTag = cand.prior_evidence_trips > 0
-      ? `<span class="prior-tag">prior evidence x${cand.prior_evidence_trips}</span>` : "";
-    const dirStats = cand.best_direction === "V" ? cand.volta : cand.ida;
-    div.innerHTML = `
-      <div class="cand-head"><span class="swatch" style="background:${color}"></span>
-        #${i + 1} vehicle_id ${cand.candidate_vehicle_id}${priorTag}</div>
-      <div class="cand-stats">
-        <span>device: ${cand.candidate_device_id || "?"}</span>
-        <span>pings: ${cand.n_pings_in_window}</span>
-        <span>dist: ${fmt(cand.best_avg_dist_to_line_m)}m</span>
-        <span>dir: ${cand.best_direction || "?"}</span>
-        <span>corr: ${fmt(dirStats ? dirStats.progress_corr : null, 2)}</span>
-      </div>`;
-    div.onclick = () => toggle(i);
-    el.appendChild(div);
+    const { div, idaShapeId, voltaShapeId } = candidateCard(cand, i);
+    container.appendChild(div);
+    if (idaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-ida`, cand, idaShapeId, IDA_COLOR, "ida"));
+    if (voltaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-volta`, cand, voltaShapeId, VOLTA_COLOR, "volta"));
   });
 }
 
 function toggle(i) {
   if (selected.has(i)) selected.delete(i); else selected.add(i);
-  renderCandidates();
+  renderCards();
 }
 
 function render(data) {
@@ -190,14 +244,13 @@ function render(data) {
   document.getElementById("feed").textContent = data.resolved_feed_version_date;
   document.getElementById("win-info").textContent = `${data.candidates.length} candidate(s) shown`;
   renderTally(data.bus_tally);
-  renderCandidates();
-  renderMap();
+  renderCards();
 }
 
 async function loadNext(advanceBus) {
   const res = await fetch(`/api/next?advance_bus=${advanceBus ? "true" : "false"}`);
   if (!res.ok) {
-    document.getElementById("candidates").innerHTML = "<div style='padding:12px'>Nothing left to review.</div>";
+    document.getElementById("cards").innerHTML = "<div style='padding:12px'>Nothing left to review.</div>";
     return;
   }
   render(await res.json());
@@ -232,17 +285,12 @@ document.getElementById("none-btn").onclick = () => submit(true);
 document.getElementById("next-bus-btn").onclick = () => loadNext(true);
 
 document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
   if (e.key >= "1" && e.key <= "9") toggle(Number(e.key) - 1);
   else if (e.key === "Enter") submit(false);
   else if (e.key.toLowerCase() === "n") submit(true);
   else if (e.key.toLowerCase() === "b") loadNext(true);
 });
-
-map = L.map("map", { zoomControl: true });
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, opacity: 0.55, attribution: "&copy; OpenStreetMap contributors"
-}).addTo(map);
-map.setView([-3.73, -38.53], 12);
 
 loadNext(false);
 </script>

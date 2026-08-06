@@ -21,6 +21,18 @@ evidence -- exactly the same statistical argument the automatic dictionary
 was built on, just with your eyes doing the discrimination instead of a
 trust_tier threshold.
 
+Each candidate is shown as its own ida/volta map pair (same convention as
+trip_finder/static/index.html: the route drawn first with its GTFS
+start/end permanently labeled, the candidate's own pings on top colored
+white->black by time) so you can see, per shown vehicle_id, whether its
+track actually walks the route in the direction implied. Every candidate
+also carries a live confidence figure -- _combined_confidence pools every
+confident automatic prediction ever made for this bus (across every
+candidate it ever pointed to, not just today's) with every trip you've
+manually reviewed, and reports a Wilson-score lower-confidence-bound on top
+of the raw agreement fraction, since a raw 1-for-1 fraction and a 50-for-50
+fraction shouldn't read as equally certain.
+
 Bus queue order: buses already in scratch.november_2023_vehicle_identity
 (the ones build_vehicle_identity.py already resolved automatically) are
 never shown. Among the rest, buses with more prior automatic evidence
@@ -45,6 +57,7 @@ Then open http://localhost:8012
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 from datetime import UTC, date, datetime
@@ -321,6 +334,32 @@ class IdentityStore:
         ).fetchall()
         return dict(rows)
 
+    def manual_evidence(self, vehicle_number: str) -> tuple[int, dict[int, int]]:
+        """Return (n_trips_manually_reviewed, {candidate_vehicle_id: n_selected}).
+
+        n_trips_manually_reviewed is the trial denominator: every trip you've
+        looked at counts once, regardless of how many candidates (0, 1, or
+        several) you selected for it.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT candidate_vehicle_id, count(*) FILTER (WHERE selected)
+            FROM scratch.vehicle_identity_labels
+            WHERE vehicle_number = %(vn)s AND candidate_vehicle_id != -1
+            GROUP BY candidate_vehicle_id
+            """,
+            {"vn": vehicle_number},
+        ).fetchall()
+        n_trips = self.conn.execute(
+            """
+            SELECT count(DISTINCT (trip_opened_at, trip_closed_at))
+            FROM scratch.vehicle_identity_labels
+            WHERE vehicle_number = %(vn)s
+            """,
+            {"vn": vehicle_number},
+        ).fetchone()
+        return (n_trips[0] if n_trips else 0), dict(rows)
+
     def candidates_for_trip(
         self, trip_opened_at: datetime, trip_closed_at: datetime
     ) -> dict[int, dict[str, Any]]:
@@ -431,37 +470,89 @@ def _clean(v: float) -> float | None:
     return None if v is None or np.isnan(v) else round(float(v), 2)
 
 
-def _bus_tally(vehicle_number: str) -> dict[str, Any]:
-    rows = store.conn.execute(
-        """
-        SELECT candidate_vehicle_id, candidate_device_id,
-               count(*) FILTER (WHERE selected) AS n_selected,
-               count(*) AS n_shown
-        FROM scratch.vehicle_identity_labels
-        WHERE vehicle_number = %(vn)s
-        GROUP BY 1, 2
-        HAVING count(*) FILTER (WHERE selected) > 0
-        ORDER BY n_selected DESC
-        """,
-        {"vn": vehicle_number},
-    ).fetchall()
-    n_trips_labeled = store.conn.execute(
-        """
-        SELECT count(DISTINCT (trip_opened_at, trip_closed_at))
-        FROM scratch.vehicle_identity_labels WHERE vehicle_number = %(vn)s
-        """,
-        {"vn": vehicle_number},
-    ).fetchone()
+def _wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
+    """Wilson score interval lower bound for a binomial proportion.
+
+    A raw wins/n fraction overstates confidence at small n (1/1 "agreement"
+    looks identical to 100/100) -- this is the standard, purely statistical
+    correction (no ML), same idea used for e.g. ranking reviews by a lower
+    confidence bound rather than raw average. z=1.96 is the two-sided 95%
+    critical value.
+    """
+    if n == 0:
+        return 0.0
+    phat = wins / n
+    denom = 1 + z**2 / n
+    center = phat + z**2 / (2 * n)
+    margin = z * math.sqrt(phat * (1 - phat) / n + z**2 / (4 * n**2))
+    return max(0.0, (center - margin) / denom)
+
+
+def _combined_confidence(
+    vehicle_number: str, candidate_ids: set[int]
+) -> dict[int, dict[str, Any]]:
+    """Combine automatic prediction evidence with your manual labels, per bus.
+
+    "Trials" = every confident automatic prediction ever made for this bus
+    (across ALL candidates it ever pointed to, not just today's trip) plus
+    every trip you've manually reviewed for it. "Wins" for a given candidate
+    = automatic predictions that pointed at it, plus manual trips where you
+    selected it. This is the exact same agreement ratio
+    build_vehicle_identity.py computes from automatic evidence alone,
+    generalized to include your labels too.
+    """
+    automatic = store.prior_evidence(vehicle_number)
+    automatic_total = sum(automatic.values())
+    n_manual_trips, manual_selected = store.manual_evidence(vehicle_number)
+    total_trials = automatic_total + n_manual_trips
+
+    out: dict[int, dict[str, Any]] = {}
+    for vid in candidate_ids | automatic.keys() | manual_selected.keys():
+        wins = automatic.get(vid, 0) + manual_selected.get(vid, 0)
+        out[vid] = {
+            "automatic_trips": automatic.get(vid, 0),
+            "manual_selected_trips": manual_selected.get(vid, 0),
+            "total_trials": total_trials,
+            "agreement_pct": round(wins / total_trials, 4) if total_trials else None,
+            "confidence_lower_bound": round(_wilson_lower_bound(wins, total_trials), 4)
+            if total_trials
+            else None,
+        }
+    return out
+
+
+TALLY_TOP_N = 5
+
+
+def _bus_tally(vehicle_number: str, candidate_ids: set[int]) -> dict[str, Any]:
+    """Summarize this bus's top few candidates by combined confidence.
+
+    A bus can accumulate automatic evidence for dozens of distinct
+    candidates over a month (e.g. a vehicle_number that turns out to be a
+    shared/generic AFC code rather than one physical bus) -- capped to the
+    top TALLY_TOP_N so this stays a glanceable summary, not a dump.
+    """
+    n_manual_trips, manual_selected = store.manual_evidence(vehicle_number)
+    confidence = _combined_confidence(vehicle_number, candidate_ids)
+    ranked = sorted(
+        (
+            (vid, stats)
+            for vid, stats in confidence.items()
+            if stats["automatic_trips"] or stats["manual_selected_trips"]
+        ),
+        key=lambda kv: kv[1]["confidence_lower_bound"] or 0,
+        reverse=True,
+    )
     return {
-        "n_trips_labeled": n_trips_labeled[0] if n_trips_labeled else 0,
+        "n_trips_labeled": n_manual_trips,
+        "n_candidates_with_evidence": len(ranked),
         "candidates": [
             {
-                "candidate_vehicle_id": r[0],
-                "candidate_device_id": r[1],
-                "n_selected": r[2],
-                "n_shown": r[3],
+                "candidate_vehicle_id": vid,
+                "manual_selected_trips": manual_selected.get(vid, 0),
+                **stats,
             }
-            for r in rows
+            for vid, stats in ranked[:TALLY_TOP_N]
         ],
     }
 
@@ -527,6 +618,11 @@ def api_next(*, advance_bus: bool = False) -> JSONResponse:
         candidates = _rank_candidates(trip, shapes)
         shapes_latlon = store.shapes_latlon_for(feed, trip["line_number"])
 
+        candidate_ids = {c["candidate_vehicle_id"] for c in candidates}
+        confidence = _combined_confidence(trip["vehicle_number"], candidate_ids)
+        for c in candidates:
+            c["confidence"] = confidence[c["candidate_vehicle_id"]]
+
         return JSONResponse(
             {
                 "vehicle_number": trip["vehicle_number"],
@@ -539,7 +635,7 @@ def api_next(*, advance_bus: bool = False) -> JSONResponse:
                     for shape_id, pts in shapes_latlon.items()
                 },
                 "candidates": candidates,
-                "bus_tally": _bus_tally(trip["vehicle_number"]),
+                "bus_tally": _bus_tally(trip["vehicle_number"], candidate_ids),
             }
         )
 
