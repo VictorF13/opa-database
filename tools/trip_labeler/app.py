@@ -6,16 +6,21 @@ shape geometry from scratch.route_shape_geoms, and writes decisions to a new
 scratch.trip_match_labels table (created on first run). Does not touch any
 existing table.
 
-Two models share the same 10-feature vector but answer different questions:
+Three models share the same 10-feature vector but answer different questions:
   - validity model: is the trip window explained by one of its candidates at
     all? (target: decision == MATCH, trained on every label)
   - candidate model: GIVEN it's valid and there are two candidates, is the
     naive-best one (smallest avg_dist_to_line_m) the right one? (trained only
     on MATCH decisions with two candidates)
-The number shown in the UI is the cross-validated accuracy of the two models
-chained together, not either model's own score in isolation. Both models and
-their tuned hyperparameters are persisted to ./model_store/ so labeling
-progress survives a server restart cheaply (no need to retune from scratch).
+  - reason model: GIVEN it's NOT valid, is it NOT_THIS_ROUTE (a real,
+    coherent route - just the wrong line) or INVALID_TRIP (no coherent route
+    at all)? (trained only on INVALID_TRIP/NOT_THIS_ROUTE decisions)
+The headline number in the UI is the cross-validated accuracy of the
+validity+candidate models chained together, not either model's own score in
+isolation - the reason model answers a separate question and is reported on
+its own. All three models and their tuned hyperparameters are persisted to
+./model_store/ so labeling progress survives a server restart cheaply (no
+need to retune from scratch).
 
 Run with:
     uv run tools/trip_labeler/app.py
@@ -41,6 +46,15 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from scoring import (
+    SOURCES,
+    TWO_CANDIDATES,
+    Candidate,
+    best_candidate,
+    compute_feature_vector,
+    load_iv_overlap,
+    load_shape_start_end_dist,
+)
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import (
@@ -51,14 +65,6 @@ from sklearn.model_selection import (
 
 DSN = "postgresql://opa:opa@localhost:5432/opa"
 MODEL_DIR = Path(__file__).parent / "model_store"
-
-SOURCES: dict[str, dict[str, str]] = {
-    "device": {"table": "scratch.device_mapping_trip_scores", "key_col": "device_id"},
-    "vehicle": {
-        "table": "scratch.vehicle_mapping_trip_scores",
-        "key_col": "vehicle_id",
-    },
-}
 
 POOL_REFILL_AT = 40
 BATCH_FETCH = 250
@@ -93,7 +99,6 @@ N_TUNE_ITER = 20
 # answers, so the search now has a real incentive to prefer calibrated models.
 BASE_MODEL_KWARGS: dict[str, Any] = {"early_stopping": True, "random_state": 0}
 
-TWO_CANDIDATES = 2  # a window has at most two direction candidates (-I and -V)
 MIN_SAMPLES_PER_CLASS = 2  # can't fold or split without at least 2 of each class
 MIN_SAMPLES_FOR_TUNING = 10  # below this, a hyperparameter search is too noisy
 PROBABILITY_THRESHOLD = 0.5  # decision boundary for turning a probability into a call
@@ -102,23 +107,6 @@ PROBABILITY_THRESHOLD = 0.5  # decision boundary for turning a probability into 
 # excluded from training everywhere below - it's an escape hatch for the
 # labeler, not a class either model ever predicts.
 Decision = Literal["MATCH", "INVALID_TRIP", "NOT_THIS_ROUTE", "UNSURE"]
-
-
-@dataclass
-class Candidate:
-    """One scored candidate (a single shape direction) for a trip window."""
-
-    shape_id: str
-    line_number: str
-    direction_id: int | None
-    avg_dist_to_line_m: float | None
-    progress_corr: float | None
-    start_proximity_m: float | None
-    end_proximity_m: float | None
-    speed_percentile: float | None
-    implied_speed_kmh: float | None
-    n_pings_in_window: int | None
-    duration_sec: float | None
 
 
 @dataclass
@@ -150,12 +138,7 @@ class Window:
 
     def best_candidate(self) -> Candidate:
         """Return the candidate with the smallest avg_dist_to_line_m."""
-        return min(
-            self.candidates,
-            key=lambda c: (
-                c.avg_dist_to_line_m if c.avg_dist_to_line_m is not None else math.inf
-            ),
-        )
+        return best_candidate(self.candidates)
 
     def feature_vector(
         self,
@@ -164,62 +147,40 @@ class Window:
     ) -> list[float]:
         """Build the shared feature vector used by both models.
 
-        Built from the best candidate + gap to runner-up, plus static
-        route-geometry features (line-level, not trip-level):
-        `iv_overlap_m` is how closely the line's own -I/-V shapes overlap
-        each other (small = the two directions run the same street,
-        structurally harder to tell apart from GPS alone), and
-        `shape_start_end_dist_m` is the straight-line distance between a
-        shape's own start and end (small = loop route, large = point-to-point).
+        Delegates to scoring.compute_feature_vector - see there for the
+        actual definition, kept in one place so the live app and any batch
+        inference script can never silently diverge.
         """
-        best = self.best_candidate()
-        rest = [c for c in self.candidates if c is not best]
-        gap = math.nan
-        if (
-            rest
-            and rest[0].avg_dist_to_line_m is not None
-            and best.avg_dist_to_line_m is not None
-        ):
-            gap = rest[0].avg_dist_to_line_m - best.avg_dist_to_line_m
-        overlap = iv_overlap_m.get(
-            (self.resolved_feed_version_date, best.line_number), math.nan
+        return compute_feature_vector(
+            self.candidates,
+            self.resolved_feed_version_date,
+            iv_overlap_m,
+            shape_start_end_dist_m,
         )
-        start_end_dist = shape_start_end_dist_m.get(
-            (self.resolved_feed_version_date, best.line_number, best.shape_id), math.nan
-        )
-        return [
-            _nan_if_none(best.avg_dist_to_line_m),
-            _nan_if_none(best.progress_corr),
-            _nan_if_none(best.start_proximity_m),
-            _nan_if_none(best.end_proximity_m),
-            _nan_if_none(best.speed_percentile),
-            _nan_if_none(best.implied_speed_kmh),
-            _nan_if_none(best.n_pings_in_window),
-            gap,
-            overlap,
-            start_end_dist,
-        ]
 
 
 @dataclass
 class LabeledExample:
-    """One labeled window, reduced to what both models need.
+    """One labeled window, reduced to what all three models need.
 
     `picked_naive_best` is only meaningful (non-None) when the decision was
     MATCH and there were two candidates - that's the only case where "which
     candidate" was actually a question. It is None for INVALID_TRIP,
     NOT_THIS_ROUTE, and single-candidate MATCH windows alike, and the
     candidate model is trained only on rows where it isn't None.
+
+    `invalid_reason` is only meaningful (non-None) when the decision was
+    NOT valid: 1 for NOT_THIS_ROUTE (a real, coherent route - just not the
+    assigned line), 0 for INVALID_TRIP (no coherent route at all). None for
+    MATCH, where the question doesn't apply. The reason model is trained
+    only on rows where it isn't None.
     """
 
     features: list[float]
     is_valid: int
     is_two_candidate: bool
     picked_naive_best: int | None
-
-
-def _nan_if_none(v: float | None) -> float:
-    return math.nan if v is None else float(v)
+    invalid_reason: int | None
 
 
 def _clean(v: Any) -> Any:  # noqa: ANN401
@@ -242,11 +203,15 @@ def _build_example(
     picked_naive_best = None
     if is_valid and is_two:
         picked_naive_best = 1 if chosen_shape_id == best.shape_id else 0
+    invalid_reason = None
+    if not is_valid:
+        invalid_reason = 1 if decision == "NOT_THIS_ROUTE" else 0
     return LabeledExample(
         features=win.feature_vector(iv_overlap_m, shape_start_end_dist_m),
         is_valid=is_valid,
         is_two_candidate=is_two,
         picked_naive_best=picked_naive_best,
+        invalid_reason=invalid_reason,
     )
 
 
@@ -265,6 +230,22 @@ def _candidate_xy(
         if e.picked_naive_best is not None:
             features.append(e.features)
             labels.append(e.picked_naive_best)
+    return features, labels
+
+
+def _reason_xy(
+    examples: list[LabeledExample],
+) -> tuple[list[list[float]], list[int]]:
+    """Features/labels for the reason model: NOT_THIS_ROUTE (1) vs INVALID_TRIP (0).
+
+    Trained only on the "not valid" subset - see LabeledExample.invalid_reason.
+    """
+    features: list[list[float]] = []
+    labels: list[int] = []
+    for e in examples:
+        if e.invalid_reason is not None:
+            features.append(e.features)
+            labels.append(e.invalid_reason)
     return features, labels
 
 
@@ -428,7 +409,7 @@ def _binary_summary(y_true: list[int], y_pred: list[int]) -> dict[str, Any] | No
 
 
 def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
-    """Honest out-of-fold precision/recall/F1/accuracy for both models.
+    """Honest out-of-fold precision/recall/F1/accuracy for all three models.
 
     Same nested methodology as _nested_pipeline_cv_accuracy (fresh
     hyperparameter search per outer fold, never touching that fold's own
@@ -438,9 +419,9 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
     classification metrics on a small sample: aggregating out-of-fold
     predictions before scoring is more stable than averaging per-fold
     metrics, which on ~5-row folds would be dominated by noise.
-    Class 1 = "valid" for the validity model, and "the naive-best candidate
-    was the right one" for the candidate model; class 0 is the opposite of
-    each.
+    Class 1 = "valid" for the validity model, "the naive-best candidate was
+    the right one" for the candidate model, and "NOT_THIS_ROUTE" (vs
+    INVALID_TRIP) for the reason model; class 0 is the opposite of each.
     """
     y_valid = [e.is_valid for e in examples]
     counts = Counter(y_valid)
@@ -456,6 +437,8 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
     valid_pred: list[int] = []
     cand_true: list[int] = []
     cand_pred: list[int] = []
+    reason_true: list[int] = []
+    reason_pred: list[int] = []
 
     for train_idx, test_idx in skf.split(x_all, y_valid):
         train_ex = [examples[i] for i in train_idx]
@@ -471,6 +454,12 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
             c_params = _tune_model(cx, cy)
             cmodel = _fit_model(cx, cy, c_params)
 
+        rx, ry = _reason_xy(train_ex)
+        rmodel = None
+        if len(set(ry)) > 1:
+            r_params = _tune_model(rx, ry)
+            rmodel = _fit_model(rx, ry, r_params)
+
         for e in test_ex:
             pv = int(vmodel.predict([e.features])[0])
             valid_true.append(e.is_valid)
@@ -479,12 +468,17 @@ def _classification_metrics(examples: list[LabeledExample]) -> dict[str, Any]:
                 cp = int(cmodel.predict([e.features])[0])
                 cand_true.append(e.picked_naive_best)
                 cand_pred.append(cp)
+            if e.invalid_reason is not None and rmodel is not None:
+                rp = int(rmodel.predict([e.features])[0])
+                reason_true.append(e.invalid_reason)
+                reason_pred.append(rp)
 
     return {
         "n_examples": len(examples),
         "n_outer_folds": outer_folds,
         "validity": _binary_summary(valid_true, valid_pred),
         "candidate": _binary_summary(cand_true, cand_pred),
+        "reason": _binary_summary(reason_true, reason_pred),
     }
 
 
@@ -522,17 +516,20 @@ class LabelStore:
         self.examples: list[LabeledExample] = []
         self.validity_model: HistGradientBoostingClassifier | None = None
         self.candidate_model: HistGradientBoostingClassifier | None = None
+        self.reason_model: HistGradientBoostingClassifier | None = None
         self.validity_params: dict[str, Any] = {}
         self.candidate_params: dict[str, Any] = {}
+        self.reason_params: dict[str, Any] = {}
         self.cv_accuracy: float | None = None
         self.cv_accuracy_n: int | None = None  # n_labels cv_accuracy was measured on
         self.validity_holdout_accuracy: float | None = None
         self.candidate_holdout_accuracy: float | None = None
+        self.reason_holdout_accuracy: float | None = None
         self.holdout_n: int | None = None  # n_labels the holdout numbers reflect
         self.n_labels = self._count_labels()
         self._source_cycle = ["device", "vehicle"]
-        self.iv_overlap_m = self._load_iv_overlap()
-        self.shape_start_end_dist_m = self._load_shape_start_end_dist()
+        self.iv_overlap_m = load_iv_overlap(self.conn)
+        self.shape_start_end_dist_m = load_shape_start_end_dist(self.conn)
         self._load_training_history()
         self._restore_or_train()
         self._refill()
@@ -598,10 +595,15 @@ class LabelStore:
             meta = json.loads(meta_path.read_text())
             self.validity_params = meta.get("validity_params", {})
             self.candidate_params = meta.get("candidate_params", {})
+            self.reason_params = meta.get("reason_params", {})
             self.validity_model = joblib.load(validity_path)
             candidate_path = MODEL_DIR / "candidate_model.joblib"
             self.candidate_model = (
                 joblib.load(candidate_path) if candidate_path.exists() else None
+            )
+            reason_path = MODEL_DIR / "reason_model.joblib"
+            self.reason_model = (
+                joblib.load(reason_path) if reason_path.exists() else None
             )
         except Exception:  # noqa: BLE001 - any load failure just means: retrain
             return False
@@ -619,6 +621,7 @@ class LabelStore:
         else:
             self.validity_holdout_accuracy = meta.get("validity_holdout_accuracy")
             self.candidate_holdout_accuracy = meta.get("candidate_holdout_accuracy")
+            self.reason_holdout_accuracy = meta.get("reason_holdout_accuracy")
             self.holdout_n = meta.get("holdout_n")
         return True
 
@@ -651,12 +654,19 @@ class LabelStore:
             cx, cy = _candidate_xy(self.examples)
             if len(set(cy)) > 1:
                 self.candidate_params = _tune_model(cx, cy)
+            rx, ry = _reason_xy(self.examples)
+            if len(set(ry)) > 1:
+                self.reason_params = _tune_model(rx, ry)
             self.cv_accuracy = _nested_pipeline_cv_accuracy(self.examples)
             self.cv_accuracy_n = len(self.examples)
         self.validity_model = _fit_model(vx, vy, self.validity_params)
         cx, cy = _candidate_xy(self.examples)
         self.candidate_model = (
             _fit_model(cx, cy, self.candidate_params) if len(set(cy)) > 1 else None
+        )
+        rx, ry = _reason_xy(self.examples)
+        self.reason_model = (
+            _fit_model(rx, ry, self.reason_params) if len(set(ry)) > 1 else None
         )
 
         self.validity_holdout_accuracy = _holdout_accuracy(vx, vy, self.validity_params)
@@ -665,6 +675,9 @@ class LabelStore:
             self.candidate_holdout_accuracy = _holdout_accuracy(
                 cx, cy, self.candidate_params
             )
+        self.reason_holdout_accuracy = None
+        if len(set(ry)) > 1:
+            self.reason_holdout_accuracy = _holdout_accuracy(rx, ry, self.reason_params)
         self.holdout_n = len(self.examples)
 
         self._save_models()
@@ -675,14 +688,18 @@ class LabelStore:
             joblib.dump(self.validity_model, MODEL_DIR / "validity_model.joblib")
         if self.candidate_model is not None:
             joblib.dump(self.candidate_model, MODEL_DIR / "candidate_model.joblib")
+        if self.reason_model is not None:
+            joblib.dump(self.reason_model, MODEL_DIR / "reason_model.joblib")
         meta = {
             "n_examples": len(self.examples),
             "validity_params": self.validity_params,
             "candidate_params": self.candidate_params,
+            "reason_params": self.reason_params,
             "cv_accuracy": self.cv_accuracy,
             "cv_accuracy_n": self.cv_accuracy_n,
             "validity_holdout_accuracy": self.validity_holdout_accuracy,
             "candidate_holdout_accuracy": self.candidate_holdout_accuracy,
+            "reason_holdout_accuracy": self.reason_holdout_accuracy,
             "holdout_n": self.holdout_n,
             "saved_at": datetime.now(UTC).isoformat(),
         }
@@ -711,41 +728,6 @@ class LabelStore:
         tune = not already_trained or n % TUNE_EVERY == 0
         self._train_and_tune(tune=tune)
         return True
-
-    def _load_iv_overlap(self) -> dict[tuple[date, str], float]:
-        """How closely each line's own -I/-V shapes overlap each other.
-
-        Once per (feed_version_date, line_number). Static route geometry,
-        loaded once at startup rather than recomputed per window.
-        """
-        rows = self.conn.execute(
-            """
-            SELECT a.feed_version_date, a.line_number,
-                   ST_HausdorffDistance(a.line_geom_proj, b.line_geom_proj)
-            FROM scratch.route_shape_geoms a
-            JOIN scratch.route_shape_geoms b
-                ON a.feed_version_date = b.feed_version_date
-               AND a.line_number = b.line_number
-               AND a.shape_id < b.shape_id
-            """
-        ).fetchall()
-        return {(r[0], r[1]): r[2] for r in rows}
-
-    def _load_shape_start_end_dist(self) -> dict[tuple[date, str, str], float]:
-        """Straight-line distance between each shape's own start and end point.
-
-        Small = loop route, large = point-to-point. Static, loaded once at startup.
-        """
-        rows = self.conn.execute(
-            """
-            SELECT feed_version_date, line_number, shape_id,
-                   ST_Distance(
-                       ST_StartPoint(line_geom_proj), ST_EndPoint(line_geom_proj)
-                   )
-            FROM scratch.route_shape_geoms
-            """
-        ).fetchall()
-        return {(r[0], r[1], r[2]): r[3] for r in rows}
 
     def _ensure_schema(self) -> None:
         self.conn.execute(
@@ -930,13 +912,14 @@ class LabelStore:
     def _score_windows(self, windows: list[Window]) -> tuple[list[float], list[float]]:
         """Return (uncertainty, p_valid) per window.
 
-        `uncertainty` is whichever of the two decisions is closer to a coin
-        flip: validity, or (for two-candidate windows) which candidate.
-        `p_valid` is the raw validity probability on its own, used
-        separately by the worst-confidence sweep to deliberately oversample
-        windows that look invalid even when the model is confident about
-        that (see _fetch_worst_confidence for why pure uncertainty isn't
-        enough for a rare class).
+        `uncertainty` is whichever of the three decisions is closest to a
+        coin flip: validity, (for two-candidate windows leaning valid)
+        which candidate, or (for windows leaning invalid) INVALID_TRIP vs
+        NOT_THIS_ROUTE. `p_valid` is the raw validity probability on its
+        own, used separately by the worst-confidence sweep to deliberately
+        oversample windows that look invalid even when the model is
+        confident about that (see _fetch_worst_confidence for why pure
+        uncertainty isn't enough for a rare class).
         """
         if not windows or self.validity_model is None:
             return [0.0] * len(windows), [0.5] * len(windows)
@@ -951,6 +934,11 @@ class LabelStore:
             for i, w in enumerate(windows):
                 if len(w.candidates) == TWO_CANDIDATES:
                     uncertainty[i] = min(uncertainty[i], abs(p_cand[i] - 0.5))
+        if self.reason_model is not None:
+            p_reason = self.reason_model.predict_proba(x)[:, 1]
+            for i, p in enumerate(p_valid):
+                if p < PROBABILITY_THRESHOLD:
+                    uncertainty[i] = min(uncertainty[i], abs(p_reason[i] - 0.5))
         return uncertainty, p_valid
 
     def _fetch_candidates(
@@ -1212,11 +1200,13 @@ class LabelStore:
             "pool_size": len(self.pool),
             "validity_trained": self.validity_model is not None,
             "candidate_trained": self.candidate_model is not None,
+            "reason_trained": self.reason_model is not None,
             "n_training_examples": len(self.examples),
             "cv_accuracy": self.cv_accuracy,
             "cv_accuracy_n": self.cv_accuracy_n,
             "validity_holdout_accuracy": self.validity_holdout_accuracy,
             "candidate_holdout_accuracy": self.candidate_holdout_accuracy,
+            "reason_holdout_accuracy": self.reason_holdout_accuracy,
             "holdout_n": self.holdout_n,
         }
 
@@ -1257,6 +1247,28 @@ def _window_to_json(w: Window) -> dict[str, Any]:
             "predicted_probability": round(predicted_probability, 4),
         }
 
+    reason_pred: dict[str, Any] | None = None
+    if (
+        store.reason_model is not None
+        and validity_pred is not None
+        and not validity_pred["predicted_valid"]
+    ):
+        p_not_this_route = float(store.reason_model.predict_proba([x])[0][1])
+        predicted_reason = (
+            "NOT_THIS_ROUTE"
+            if p_not_this_route >= PROBABILITY_THRESHOLD
+            else "INVALID_TRIP"
+        )
+        reason_pred = {
+            "predicted_reason": predicted_reason,
+            "predicted_probability": round(
+                p_not_this_route
+                if p_not_this_route >= PROBABILITY_THRESHOLD
+                else 1 - p_not_this_route,
+                4,
+            ),
+        }
+
     return {
         "source": w.source,
         "entity_id": w.entity_id,
@@ -1265,7 +1277,11 @@ def _window_to_json(w: Window) -> dict[str, Any]:
         "line_number": best.line_number,
         "resolved_feed_version_date": w.resolved_feed_version_date.isoformat(),
         "priority": w.priority,
-        "model_prediction": {"validity": validity_pred, "candidate": candidate_pred},
+        "model_prediction": {
+            "validity": validity_pred,
+            "candidate": candidate_pred,
+            "reason": reason_pred,
+        },
         "candidates": [
             {
                 "shape_id": c.shape_id,

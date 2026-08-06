@@ -216,8 +216,12 @@ function updateStats(stats) {
     const acc = stats.cv_accuracy === null || stats.cv_accuracy === undefined
       ? "n/a (too little data yet for a nested estimate)"
       : `${(stats.cv_accuracy * 100).toFixed(0)}% (nested, measured @ n=${stats.cv_accuracy_n})`;
-    const cand = stats.candidate_trained ? "valid+candidate" : "valid-only";
-    document.getElementById("stat-model").textContent = `active (${cand}, n=${stats.n_training_examples}, pipeline cv acc ${acc})`;
+    const models = [
+      "valid",
+      stats.candidate_trained ? "candidate" : null,
+      stats.reason_trained ? "reason" : null,
+    ].filter(Boolean).join("+");
+    document.getElementById("stat-model").textContent = `active (${models}, n=${stats.n_training_examples}, pipeline cv acc ${acc})`;
   }
 
   const fmtPct = (v) => (v === null || v === undefined ? "n/a" : `${(v * 100).toFixed(0)}%`);
@@ -225,7 +229,7 @@ function updateStats(stats) {
     document.getElementById("stat-holdout").textContent = "n/a";
   } else {
     document.getElementById("stat-holdout").textContent =
-      `validity ${fmtPct(stats.validity_holdout_accuracy)} / candidate ${fmtPct(stats.candidate_holdout_accuracy)} (@ n=${stats.holdout_n}, quick check, not nested)`;
+      `validity ${fmtPct(stats.validity_holdout_accuracy)} / candidate ${fmtPct(stats.candidate_holdout_accuracy)} / reason ${fmtPct(stats.reason_holdout_accuracy)} (@ n=${stats.holdout_n}, quick check, not nested)`;
   }
 }
 
@@ -239,6 +243,12 @@ function renderModelPrediction(mp) {
     text += ` &nbsp;|&nbsp; Model 2 (candidate): predicts <b>${c.predicted_shape_id}</b> (${(c.predicted_probability * 100).toFixed(0)}% confidence)`;
   } else if (v.predicted_valid) {
     text += ` &nbsp;|&nbsp; Model 2 (candidate): not applicable or not trained yet`;
+  }
+  if (mp.reason) {
+    const r = mp.reason;
+    text += ` &nbsp;|&nbsp; Model 3 (reason): predicts <b>${r.predicted_reason}</b> (${(r.predicted_probability * 100).toFixed(0)}% confidence)`;
+  } else if (!v.predicted_valid) {
+    text += ` &nbsp;|&nbsp; Model 3 (reason): not trained yet`;
   }
   return text;
 }
