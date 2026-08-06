@@ -569,27 +569,47 @@ class IdentityStore:
         """Build this bus's full trip list and kick off background pre-scoring.
 
         Must be called while holding _lock. qualifying_trips already
-        resolved every trip's feed/shape-length in one batched query, so
-        this just orders the list (longest GTFS route first -- more of the
-        road to judge a candidate against; duration is only a tiebreak now)
-        and hands it to the background worker, which stays PREFETCH_AHEAD
-        trips ahead of serve_index rather than racing through the whole
-        list at once -- a bus can have hundreds of qualifying trips, and
-        letting the worker fire off that many heavy avl_pings scans back to
-        back saturates Postgres badly enough to stall the very request
-        that's waiting on the current trip.
+        resolved every trip's feed/shape-length in one batched query.
+        Ordering has two levels: within a line_number, longest GTFS route
+        first (more of the road to judge a candidate against; duration is
+        only a tiebreak); across line_numbers, round-robin -- a bus running
+        several routes gets a DIFFERENT one every trip for as long as
+        possible before ever repeating one, since a candidate that keeps
+        checking out across genuinely different routes is far stronger
+        disambiguating evidence than several trips on the same route. A
+        bus that only ever ran one route in November just serves that
+        route's trips in shape-length order, same as before.
+
+        Hands the ordered list to the background worker, which stays
+        PREFETCH_AHEAD trips ahead of serve_index rather than racing
+        through the whole list at once -- a bus can have hundreds of
+        qualifying trips, and letting the worker fire off that many heavy
+        avl_pings scans back to back saturates Postgres badly enough to
+        stall the very request that's waiting on the current trip.
         """
         self.prefetch_generation += 1
         generation = self.prefetch_generation
         trips = self.qualifying_trips(vehicle_number)
-        trips.sort(
-            key=lambda t: (
-                t["_shape_length_m"],
-                t["trip_closed_at"] - t["trip_opened_at"],
-            ),
-            reverse=True,
-        )
-        self.trip_list = trips
+
+        by_line: dict[str, list[dict[str, Any]]] = {}
+        for trip in trips:
+            by_line.setdefault(trip["line_number"], []).append(trip)
+        for line_trips in by_line.values():
+            line_trips.sort(
+                key=lambda t: (
+                    t["_shape_length_m"],
+                    t["trip_closed_at"] - t["trip_opened_at"],
+                ),
+                reverse=True,
+            )
+        # round-robin across lines, most-trips-remaining line first so a
+        # line with a long tail doesn't get starved behind short ones
+        queues = sorted(by_line.values(), key=len, reverse=True)
+        interleaved: list[dict[str, Any]] = []
+        for i in range(max((len(q) for q in queues), default=0)):
+            interleaved.extend(q[i] for q in queues if i < len(q))
+
+        self.trip_list = interleaved
         self.serve_index = 0
         self.trip_cache = {}
         threading.Thread(
