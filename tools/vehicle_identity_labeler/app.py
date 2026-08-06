@@ -460,23 +460,41 @@ class IdentityStore:
         return dict(rows)
 
     def device_ids_for(self, avl_vehicle_ids: list[int]) -> dict[int, str]:
-        """Map avl_vehicle_id -> its most-common device_id, city-wide.
+        """Map avl_vehicle_id -> a representative device_id, November 2023 only.
 
         Not scoped to any one trip -- used for the bus-level tally, which
         can rank a candidate the current trip's own window never even saw
         pings for. vehicle_id<->device_id pairing is highly stable (only
         9/1484 November vehicle_ids ever showed >1 device_id), so "most
-        common overall" is a safe stand-in for "the one right now".
+        recent ping in November" is a safe, cheap stand-in for "the true
+        mode".
+
+        LATERAL + LIMIT 1 per vehicle_id, not a DISTINCT ON over the whole
+        set: DISTINCT ON forced Postgres to index-scan every one of a
+        vehicle's ~89k November pings and sort them just to keep one row,
+        instead of an index-backward-scan straight to the answer. Measured
+        stuck at 2+ minutes per call with no date filter at all (silver.
+        avl_pings is partitioned by metric_timestamp, so that scanned every
+        month of data too); with the date filter but still DISTINCT ON,
+        1.2s warm/13.5s cold; this version measured 0.1ms. _bus_tally calls
+        this on every /api/next, so this was the actual "submission is
+        slow" bottleneck.
         """
         if not avl_vehicle_ids:
             return {}
         rows = self.conn.execute(
             """
-            SELECT DISTINCT ON (vehicle_id) vehicle_id, device_id
-            FROM silver.avl_pings
-            WHERE vehicle_id = ANY(%(vids)s)
-            GROUP BY vehicle_id, device_id
-            ORDER BY vehicle_id, count(*) DESC
+            SELECT v.vid, sub.device_id
+            FROM unnest(%(vids)s::integer[]) AS v(vid)
+            CROSS JOIN LATERAL (
+                SELECT device_id
+                FROM silver.avl_pings
+                WHERE vehicle_id = v.vid
+                  AND metric_timestamp >= '2023-11-01'
+                  AND metric_timestamp < '2023-12-01'
+                ORDER BY metric_timestamp DESC
+                LIMIT 1
+            ) sub
             """,
             {"vids": avl_vehicle_ids},
         ).fetchall()
