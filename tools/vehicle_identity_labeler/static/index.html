@@ -31,6 +31,14 @@
   .conf-high { background: #bbf7d0; color: #065f46; }
   .conf-mid { background: #fde68a; color: #92400e; }
   .conf-low { background: #e5e7eb; color: #4b5563; }
+  .status-tag { border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: 800;
+                letter-spacing: 0.03em; }
+  .status-resolved { background: #16a34a; color: #fff; }
+  .status-ambiguous { background: #f59e0b; color: #fff; }
+  #confirm-btn { margin-left: auto; font-size: 12px; padding: 5px 12px; border-radius: 6px;
+                 cursor: pointer; font-weight: 700; }
+  #confirm-btn.confirm-ready { border: 1px solid #16a34a; background: #16a34a; color: #fff; }
+  #confirm-btn.confirm-unsure { border: 1px solid #d97706; background: #fff; color: #92400e; }
   .stat { color: #4b5563; }
   .checkbox { width: 16px; height: 16px; }
   .maps { display: flex; height: 520px; }
@@ -161,7 +169,10 @@ function drawDirectionMap(divId, cand, shapeId, color, label) {
   return map;
 }
 
+let currentTally = null;
+
 function renderTally(tally) {
+  currentTally = tally;
   const el = document.getElementById("tally");
   const chips = tally.candidates.map((c) => {
     const cls = confidenceClass(c.confidence_lower_bound);
@@ -172,8 +183,37 @@ function renderTally(tally) {
   const more = tally.n_candidates_with_evidence > tally.candidates.length
     ? `<span class="stat">(+${tally.n_candidates_with_evidence - tally.candidates.length} more with weaker evidence)</span>`
     : "";
+  const status = tally.status === "resolved"
+    ? `<span class="status-tag status-resolved">RESOLVED &rarr; vid ${tally.resolved_candidate_vehicle_id}</span>`
+    : `<span class="status-tag status-ambiguous">AMBIGUOUS</span>`;
+  const top = tally.candidates[0];
+  const confirmBtn = top
+    ? `<button id="confirm-btn" class="${tally.status === "resolved" ? "confirm-ready" : "confirm-unsure"}">
+         Confirm bus &rarr; vid ${top.candidate_vehicle_id}${tally.status === "resolved" ? "" : " (still ambiguous)"}
+       </button>`
+    : "";
   el.innerHTML =
-    `<span><b>${tally.n_trips_labeled}</b> trip(s) reviewed for this bus</span>${chips}${more}`;
+    `${status}<span><b>${tally.n_trips_labeled}</b> trip(s) reviewed for this bus</span>${chips}${more}${confirmBtn}`;
+  const btn = document.getElementById("confirm-btn");
+  if (btn) btn.onclick = confirmBus;
+}
+
+async function confirmBus() {
+  if (!currentTally || !currentTally.candidates.length || !current) return;
+  const top = currentTally.candidates[0];
+  await fetch("/api/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vehicle_number: current.vehicle_number,
+      avl_vehicle_id: top.candidate_vehicle_id,
+      device_id: top.candidate_device_id || null,
+      agreement_pct: top.agreement_pct,
+      confidence_lower_bound: top.confidence_lower_bound,
+      total_trials: top.total_trials,
+    }),
+  });
+  loadNext(false);
 }
 
 function candidateCard(cand, i) {
