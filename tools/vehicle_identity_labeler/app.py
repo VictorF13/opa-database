@@ -210,6 +210,13 @@ class IdentityStore:
         self.conn = psycopg.connect(dsn, autocommit=True)
         self.prefetch_conn = psycopg.connect(dsn, autocommit=True)
         self.batch_conn = psycopg.connect(dsn, autocommit=True)
+        # Exclusively for /api/rapid/* request handlers -- batch_conn is
+        # exclusively for _batch_worker/_batch_score_bus, which holds it
+        # busy for 1-3s at a time scoring a trip. A rapid-review request
+        # sharing that same connection would have to queue up behind
+        # whatever the background pass was already doing, and psycopg
+        # connections aren't safe for concurrent use across threads anyway.
+        self.rapid_conn = psycopg.connect(dsn, autocommit=True)
         self.transformer = pyproj.Transformer.from_crs(
             "EPSG:4326", f"EPSG:{UTM_24S}", always_xy=True
         )
@@ -1550,7 +1557,7 @@ def rapid_index() -> FileResponse:
 
 def _rapid_progress() -> dict[str, int]:
     """Overall "how many buses left" snapshot for the rapid-review header."""
-    row = store.batch_conn.execute(
+    row = store.rapid_conn.execute(
         """
         WITH all_buses AS (
             SELECT DISTINCT vehicle_number FROM silver.afc_boardings
@@ -1601,7 +1608,7 @@ def api_rapid_next() -> JSONResponse:
     always just picks the best of what's currently available rather than
     waiting for the whole pool to finish.
     """
-    row = store.batch_conn.execute(
+    row = store.rapid_conn.execute(
         """
         WITH eligible AS (
             SELECT b.*
@@ -1667,10 +1674,10 @@ def api_rapid_next() -> JSONResponse:
     for inst in instances:
         feed = date.fromisoformat(inst["resolved_feed_version_date"])
         line = inst["line_number"]
-        shapes = store.shapes_latlon_for(feed, line, store.batch_conn)
+        shapes = store.shapes_latlon_for(feed, line, store.rapid_conn)
         opened = datetime.fromisoformat(inst["trip_opened_at"])
         closed = datetime.fromisoformat(inst["trip_closed_at"])
-        pings = store.single_candidate_pings(vid, opened, closed, store.batch_conn)
+        pings = store.single_candidate_pings(vid, opened, closed, store.rapid_conn)
         rendered_instances.append(
             {
                 "line_number": line,
@@ -1722,7 +1729,7 @@ def api_rapid_deny(payload: RapidDenyIn) -> dict[str, Any]:
     entirely. "Yes" doesn't need an equivalent endpoint here -- the rapid
     UI just calls the existing /api/confirm directly.
     """
-    store.batch_conn.execute(
+    store.rapid_conn.execute(
         """
         INSERT INTO scratch.vehicle_identity_batch_rejected
             (vehicle_number, candidate_vehicle_id, rejected_at)
