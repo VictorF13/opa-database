@@ -10,9 +10,8 @@ uv run prek install   # or: pre-commit install
 ```
 
 See the [README](README.md) for environment variables and running the
-pipeline end to end, and [`docs/architecture.md`](docs/architecture.md) /
-[`docs/gold-layer.md`](docs/gold-layer.md) for how the codebase is
-organized.
+pipeline end to end, and [`docs/architecture.md`](docs/architecture.md)
+for how the codebase is organized.
 
 ## Dependencies
 
@@ -100,7 +99,7 @@ The end-to-end flow:
    [Conventional Commits](https://www.conventionalcommits.org/)
    (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `perf:`, `test:`,
    `ci:`, `build:`, `style:`, `revert:`, optionally scoped like
-   `feat(gold): ...`), `validate` runs formatting/lint/type checks, and
+   `feat(silver): ...`), `validate` runs formatting/lint/type checks, and
    `test` runs the pytest suite. All three must pass before merging.
 2. Once merged into `develop`, that push triggers `prep-release-pr`:
    CI automatically opens (or updates, if one is already open) a
