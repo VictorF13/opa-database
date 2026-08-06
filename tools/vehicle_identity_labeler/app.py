@@ -102,7 +102,6 @@ import json
 import math
 import sys
 import threading
-import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -210,6 +209,7 @@ class IdentityStore:
         """Connect to Postgres (main + a dedicated prefetch connection)."""
         self.conn = psycopg.connect(dsn, autocommit=True)
         self.prefetch_conn = psycopg.connect(dsn, autocommit=True)
+        self.batch_conn = psycopg.connect(dsn, autocommit=True)
         self.transformer = pyproj.Transformer.from_crs(
             "EPSG:4326", f"EPSG:{UTM_24S}", always_xy=True
         )
@@ -223,6 +223,15 @@ class IdentityStore:
         self.serve_index = 0
         self.trip_cache: dict[tuple[str, str, datetime, datetime], dict[str, Any]] = {}
         self.prefetch_generation = 0
+        # Per-bus model tally: candidate_vehicle_id -> how many trips (out of
+        # every trip scored so far, served or not) the model's own top pick
+        # was this candidate with >= MODEL_TALLY_MIN_PROB. Reset in
+        # start_prefetch. model_tally_seen prevents double-counting a trip
+        # that gets scored via more than one path (prefetch worker, sync
+        # fallback, or a cache hit).
+        self.model_tally: dict[int, int] = {}
+        self.model_tally_trips_scored = 0
+        self.model_tally_seen: set[tuple[str, str, datetime, datetime]] = set()
         self._ensure_schema()
         self.claimed_vehicle_ids = self._load_claimed_vehicle_ids()
 
@@ -309,6 +318,52 @@ class IdentityStore:
             )
             """
         )
+        # Rapid-review batch pass (see _batch_worker): one row per (bus,
+        # candidate) that ever won as the model's top pick on at least one
+        # trip, with its best up-to-4 trip instances for on-demand map
+        # rendering. Rebuilt in place per bus (DELETE + re-INSERT) each time
+        # _batch_score_bus reruns that bus, not append-only.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scratch.vehicle_identity_batch_scores (
+                vehicle_number text NOT NULL,
+                candidate_vehicle_id integer NOT NULL,
+                candidate_device_id text,
+                n_trips_scored integer NOT NULL,
+                n_trips_as_top_pick integer NOT NULL,
+                avg_top_probability double precision,
+                instances jsonb NOT NULL,
+                scored_at timestamptz NOT NULL,
+                PRIMARY KEY (vehicle_number, candidate_vehicle_id)
+            )
+            """
+        )
+        # A bus this app has already batch-scored at least once -- lets the
+        # worker skip it on subsequent passes without re-deriving that from
+        # batch_scores (which could have zero rows for a bus with no
+        # confident candidates at all, indistinguishable from "not
+        # processed yet" otherwise).
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scratch.vehicle_identity_batch_progress (
+                vehicle_number text PRIMARY KEY,
+                scored_at timestamptz NOT NULL
+            )
+            """
+        )
+        # A (bus, candidate) pair you explicitly said "no" to in the rapid
+        # review flow -- excluded from future /api/rapid/next picks for
+        # that bus so the same rejected candidate never resurfaces.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scratch.vehicle_identity_batch_rejected (
+                vehicle_number text NOT NULL,
+                candidate_vehicle_id integer NOT NULL,
+                rejected_at timestamptz NOT NULL,
+                PRIMARY KEY (vehicle_number, candidate_vehicle_id)
+            )
+            """
+        )
 
     def next_bus(self) -> str | None:
         """Pick the not-yet-resolved bus with the fewest candidate possibilities.
@@ -372,8 +427,106 @@ class IdentityStore:
         ).fetchone()
         return row[0] if row else None
 
-    def qualifying_trips(self, vehicle_number: str) -> list[dict[str, Any]]:
-        """Return this bus's not-yet-labeled >=15min November trips.
+    def next_unscored_bus(self, conn: psycopg.Connection) -> str | None:
+        """Pick the not-yet-batch-scored bus with the fewest possibilities.
+
+        Same fewest-possibilities-first ordering as next_bus (see its
+        docstring), but scoped to scratch.vehicle_identity_batch_progress
+        instead of skipped_this_session -- this is a durable, continuously
+        running background pass (_batch_worker), not the interactive
+        per-session queue, so "already handled" needs to persist across
+        restarts rather than reset each session.
+        """
+        row = conn.execute(
+            """
+            WITH evidence AS (
+                SELECT vehicle_number, entity_id::integer AS avl_vehicle_id
+                FROM scratch.trip_match_predictions
+                WHERE source = 'vehicle' AND trust_tier = 'high_confidence_valid'
+                UNION ALL
+                SELECT vehicle_number, predicted_candidate_vehicle_id
+                FROM scratch.trip_finder_predictions
+                WHERE trust_tier = 'high_confidence_valid'
+                  AND predicted_candidate_vehicle_id IS NOT NULL
+                UNION ALL
+                SELECT vehicle_number, candidate_vehicle_id
+                FROM scratch.vehicle_identity_labels
+                WHERE candidate_vehicle_id != -1
+            ),
+            per_bus AS (
+                SELECT vehicle_number,
+                       count(*) AS n_trials,
+                       count(DISTINCT avl_vehicle_id) AS n_distinct
+                FROM evidence
+                GROUP BY vehicle_number
+            ),
+            all_buses AS (
+                SELECT DISTINCT vehicle_number FROM silver.afc_boardings
+                WHERE trip_opened_at >= '2023-11-01' AND trip_opened_at < '2023-12-01'
+            )
+            SELECT a.vehicle_number
+            FROM all_buses a
+            LEFT JOIN per_bus p USING (vehicle_number)
+            WHERE a.vehicle_number NOT IN (
+                SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
+            )
+            AND a.vehicle_number NOT IN (
+                SELECT vehicle_number FROM scratch.vehicle_identity_confirmed
+            )
+            AND a.vehicle_number NOT IN (
+                SELECT vehicle_number FROM scratch.vehicle_identity_batch_progress
+            )
+            ORDER BY
+                COALESCE(p.n_distinct, 0) = 0,
+                COALESCE(p.n_distinct, 999999) ASC,
+                COALESCE(p.n_trials, 0) DESC,
+                a.vehicle_number
+            LIMIT 1
+            """
+        ).fetchone()
+        return row[0] if row else None
+
+    def single_candidate_pings(
+        self,
+        vehicle_id: int,
+        trip_opened_at: datetime,
+        trip_closed_at: datetime,
+        conn: psycopg.Connection,
+    ) -> list[dict[str, Any]]:
+        """Return one candidate's own pings for one trip window.
+
+        For rapid-review map rendering, where the candidate is already
+        known (from scratch.vehicle_identity_batch_scores) rather than
+        being discovered by scanning every active vehicle. A direct
+        (vehicle_id, metric_timestamp) index range scan, not the city-wide
+        candidates_for_trip query the interactive flow needs.
+        """
+        rows = conn.execute(
+            """
+            SELECT metric_timestamp, longitude, latitude
+            FROM silver.avl_pings
+            WHERE vehicle_id = %(vid)s
+              AND metric_timestamp BETWEEN %(start)s AND %(end)s
+            ORDER BY metric_timestamp
+            """,
+            {"vid": vehicle_id, "start": trip_opened_at, "end": trip_closed_at},
+        ).fetchall()
+        return [{"t": t.isoformat(), "lon": lon, "lat": lat} for t, lon, lat in rows]
+
+    def qualifying_trips(
+        self,
+        vehicle_number: str,
+        conn: psycopg.Connection,
+        *,
+        exclude_labeled: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return this bus's >=15min November trips.
+
+        exclude_labeled=True (the interactive-review default) skips trips
+        already manually labeled in this app; the batch-scoring pass
+        (_batch_score_bus) wants exclude_labeled=False, since the model
+        should see every trip regardless of what's already been reviewed
+        by hand.
 
         Each trip's GTFS feed and longest ida/volta shape length are
         resolved here too, but via a dedupe-then-batch-join, not a LATERAL
@@ -388,23 +541,32 @@ class IdentityStore:
         two small queries.
 
         Trips whose line has no shape in any feed at all are dropped here
-        and sentinel-written immediately, so start_prefetch and the
+        and sentinel-written immediately (exclude_labeled=True only -- the
+        batch pass has no use for that bookkeeping and shouldn't write to
+        scratch.vehicle_identity_labels), so start_prefetch and the
         background worker never have to special-case them.
         """
-        trip_rows = self.conn.execute(
+        exclusion_clause = (
             """
-            SELECT DISTINCT vehicle_number, line_number, trip_opened_at, trip_closed_at
-            FROM silver.afc_boardings b
-            WHERE vehicle_number = %(vn)s
-              AND trip_opened_at >= '2023-11-01' AND trip_opened_at < '2023-12-01'
-              AND trip_closed_at - trip_opened_at >= interval '%(min)s minutes'
               AND NOT EXISTS (
                   SELECT 1 FROM scratch.vehicle_identity_labels l
                   WHERE l.vehicle_number = b.vehicle_number
                     AND l.trip_opened_at = b.trip_opened_at
                     AND l.trip_closed_at = b.trip_closed_at
               )
-            """,
+            """
+            if exclude_labeled
+            else ""
+        )
+        trip_rows = conn.execute(
+            f"""
+            SELECT DISTINCT vehicle_number, line_number, trip_opened_at, trip_closed_at
+            FROM silver.afc_boardings b
+            WHERE vehicle_number = %(vn)s
+              AND trip_opened_at >= '2023-11-01' AND trip_opened_at < '2023-12-01'
+              AND trip_closed_at - trip_opened_at >= interval '%(min)s minutes'
+            {exclusion_clause}
+            """,  # noqa: S608
             {"vn": vehicle_number, "min": MIN_TRIP_MINUTES},
         ).fetchall()
         if not trip_rows:
@@ -420,7 +582,7 @@ class IdentityStore:
         ]
 
         pairs = {(t["line_number"], t["trip_opened_at"].date()) for t in trips}
-        feed_rows = self.conn.execute(
+        feed_rows = conn.execute(
             """
             SELECT want.line, want.d,
                    COALESCE(r.resolved_feed_version_date, fb.fallback_feed) AS feed
@@ -445,7 +607,7 @@ class IdentityStore:
         }
         length_by_feed_line: dict[tuple[date, str], float] = {}
         if feed_lines:
-            length_rows = self.conn.execute(
+            length_rows = conn.execute(
                 """
                 SELECT want.feed, want.line, max(g.shape_length_m)
                 FROM unnest(%(feeds)s::date[], %(lines)s::text[]) AS want(feed, line)
@@ -465,7 +627,8 @@ class IdentityStore:
             pair = (trip["line_number"], trip["trip_opened_at"].date())
             feed = feed_by_pair.get(pair)
             if feed is None:
-                self.write_sentinel(trip)
+                if exclude_labeled:
+                    self.write_sentinel(trip, conn)
                 continue
             trip["resolved_feed_version_date"] = feed
             trip["_shape_length_m"] = length_by_feed_line.get(
@@ -686,13 +849,15 @@ class IdentityStore:
             entry["ts"].append(ts)
         return by_vehicle
 
-    def write_sentinel(self, trip: dict[str, Any]) -> None:
+    def write_sentinel(self, trip: dict[str, Any], conn: psycopg.Connection) -> None:
         """Mark a trip reviewed-and-unusable (no GTFS shape in any feed).
 
         candidate_vehicle_id=-1 is not a real vehicle_id; it's a sentinel
-        _bus_tally/manual_evidence explicitly exclude.
+        _bus_tally/manual_evidence explicitly exclude. Takes an explicit
+        conn since qualifying_trips (its only caller) runs from both the
+        request-handling thread and the batch-scoring thread.
         """
-        self.conn.execute(
+        conn.execute(
             """
             INSERT INTO scratch.vehicle_identity_labels
                 (vehicle_number, line_number, trip_opened_at, trip_closed_at,
@@ -726,16 +891,20 @@ class IdentityStore:
         bus that only ever ran one route in November just serves that
         route's trips in shape-length order, same as before.
 
-        Hands the ordered list to the background worker, which stays
-        PREFETCH_AHEAD trips ahead of serve_index rather than racing
-        through the whole list at once -- a bus can have hundreds of
-        qualifying trips, and letting the worker fire off that many heavy
-        avl_pings scans back to back saturates Postgres badly enough to
-        stall the very request that's waiting on the current trip.
+        Hands the ordered list to the background worker, which prioritizes
+        staying PREFETCH_AHEAD trips ahead of serve_index (so navigating
+        trip-to-trip stays fast) and only once that's satisfied continues
+        through the REST of the list too, at that same lower priority --
+        purely to fill in model_tally, so you can see how consistently the
+        model agrees across trips you haven't even reached yet. This is
+        safe now in a way it wasn't before the afc_boardings index fix:
+        each trip costs ~1-3s instead of ~25s+, so working through a whole
+        bus's trip list in the background no longer means firing off
+        enough slow queries at once to stall the foreground request.
         """
         self.prefetch_generation += 1
         generation = self.prefetch_generation
-        trips = self.qualifying_trips(vehicle_number)
+        trips = self.qualifying_trips(vehicle_number, self.conn)
 
         by_line: dict[str, list[dict[str, Any]]] = {}
         for trip in trips:
@@ -758,6 +927,9 @@ class IdentityStore:
         self.trip_list = interleaved
         self.serve_index = 0
         self.trip_cache = {}
+        self.model_tally = {}
+        self.model_tally_trips_scored = 0
+        self.model_tally_seen = set()
         threading.Thread(
             target=_prefetch_worker, args=(generation,), daemon=True
         ).start()
@@ -788,7 +960,7 @@ def _build_trip_payload(
     """
     feed = trip["resolved_feed_version_date"]
     shapes = store.shapes_for(feed, trip["line_number"], conn)
-    candidates = _rank_candidates(trip, shapes, conn)
+    candidates, top_pick = _rank_candidates(trip, shapes, conn)
     shapes_latlon = store.shapes_latlon_for(feed, trip["line_number"], conn)
     return {
         "vehicle_number": trip["vehicle_number"],
@@ -801,20 +973,49 @@ def _build_trip_payload(
             for shape_id, pts in shapes_latlon.items()
         },
         "candidates": candidates,
+        "model_top_candidate_vehicle_id": top_pick[0] if top_pick else None,
+        "model_top_candidate_probability": round(top_pick[1], 4) if top_pick else None,
     }
 
 
 PREFETCH_AHEAD = 3
+MODEL_TALLY_MIN_PROB = 0.5
+
+
+def _record_model_tally(
+    key: tuple[str, str, datetime, datetime], payload: dict[str, Any]
+) -> None:
+    """Count one trip's model top pick toward the per-bus tally.
+
+    Must be called while holding _lock. Idempotent per trip
+    (model_tally_seen) since the same trip can reach this from more than
+    one path -- the prefetch worker, api_next's synchronous fallback, or
+    (rarely) both racing on the same trip. Only counts a "vote" when the
+    model's own top pick clears MODEL_TALLY_MIN_PROB -- a trip where even
+    the best candidate is unlikely shouldn't silently count as a vote for
+    that candidate, same convention as this project's other trust_tier
+    thresholds.
+    """
+    if key in store.model_tally_seen:
+        return
+    store.model_tally_seen.add(key)
+    store.model_tally_trips_scored += 1
+    vid = payload.get("model_top_candidate_vehicle_id")
+    prob = payload.get("model_top_candidate_probability")
+    if vid is not None and prob is not None and prob >= MODEL_TALLY_MIN_PROB:
+        store.model_tally[vid] = store.model_tally.get(vid, 0) + 1
 
 
 def _prefetch_worker(generation: int) -> None:
-    """Background thread: stay PREFETCH_AHEAD trips ahead of serve_index.
+    """Background thread, two-tier priority.
 
-    Deliberately bounded, not "score the whole bus as fast as possible" --
-    see start_prefetch's docstring for why. Stops the moment the bus
-    changes again (generation bumped) so a stale worker never writes
-    results for a bus that's no longer current; idles (short sleep) once
-    it's caught up, waking back up as serve_index advances.
+    First stays PREFETCH_AHEAD trips ahead of serve_index (so trip-to-trip
+    navigation stays fast); once that's satisfied, continues through the
+    REST of trip_list too, same lower priority, purely so model_tally can
+    grow toward covering every trip without you having to review each one
+    yourself (see start_prefetch's docstring for why this is safe now).
+    Stops the moment the bus changes again (generation bumped) so a stale
+    worker never writes results for a bus that's no longer current.
     """
     while True:
         with _lock:
@@ -829,17 +1030,122 @@ def _prefetch_worker(generation: int) -> None:
                 ),
                 None,
             )
-            done = store.serve_index >= len(store.trip_list)
-        if done:
-            return
-        if trip is None:
-            time.sleep(0.2)
-            continue
+            if trip is None:
+                trip = next(
+                    (
+                        t
+                        for t in store.trip_list
+                        if _trip_key(t) not in store.model_tally_seen
+                    ),
+                    None,
+                )
+            if trip is None:
+                return
         payload = _build_trip_payload(trip, store.prefetch_conn)
         with _lock:
             if generation != store.prefetch_generation:
                 return
             store.trip_cache[_trip_key(trip)] = payload
+            _record_model_tally(_trip_key(trip), payload)
+
+
+def _batch_score_bus(vehicle_number: str, conn: psycopg.Connection) -> None:
+    """Score every trip for one bus and write its rapid-review candidates.
+
+    Reuses _build_trip_payload per trip (same model-scoring path as
+    interactive review) purely for its model_top_candidate_vehicle_id/
+    probability -- not interested in the full map payload here, that gets
+    rebuilt on demand (single_candidate_pings) only for whichever
+    candidate you're actually reviewing in the rapid flow, so this doesn't
+    have to store a giant ping blob per trip for every bus up front.
+
+    A candidate only earns a row if it was the model's own top pick (with
+    probability >= MODEL_TALLY_MIN_PROB) on at least one trip -- same bar
+    _record_model_tally uses. Its up-to-4 best (highest-probability)
+    trips become the "instances" the rapid-review UI shows maps for.
+    """
+    trips = store.qualifying_trips(vehicle_number, conn, exclude_labeled=False)
+    per_candidate: dict[int, list[tuple[dict[str, Any], float]]] = {}
+    for trip in trips:
+        payload = _build_trip_payload(trip, conn)
+        vid = payload["model_top_candidate_vehicle_id"]
+        prob = payload["model_top_candidate_probability"]
+        if vid is None or prob is None or prob < MODEL_TALLY_MIN_PROB:
+            continue
+        per_candidate.setdefault(vid, []).append((trip, prob))
+
+    now = datetime.now(UTC)
+    device_ids = store.device_ids_for(list(per_candidate.keys()))
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM scratch.vehicle_identity_batch_scores "
+            "WHERE vehicle_number = %(vn)s",
+            {"vn": vehicle_number},
+        )
+        for vid, wins in per_candidate.items():
+            wins.sort(key=lambda w: w[1], reverse=True)
+            instances = [
+                {
+                    "line_number": t["line_number"],
+                    "trip_opened_at": t["trip_opened_at"].isoformat(),
+                    "trip_closed_at": t["trip_closed_at"].isoformat(),
+                    "resolved_feed_version_date": t[
+                        "resolved_feed_version_date"
+                    ].isoformat(),
+                    "model_valid_probability": round(p, 4),
+                }
+                for t, p in wins[:4]
+            ]
+            cur.execute(
+                """
+                INSERT INTO scratch.vehicle_identity_batch_scores
+                    (vehicle_number, candidate_vehicle_id, candidate_device_id,
+                     n_trips_scored, n_trips_as_top_pick, avg_top_probability,
+                     instances, scored_at)
+                VALUES (%(vn)s, %(vid)s, %(did)s, %(nts)s, %(ntp)s, %(avg)s,
+                        %(inst)s, %(now)s)
+                """,
+                {
+                    "vn": vehicle_number,
+                    "vid": vid,
+                    "did": device_ids.get(vid),
+                    "nts": len(trips),
+                    "ntp": len(wins),
+                    "avg": sum(p for _, p in wins) / len(wins),
+                    "inst": json.dumps(instances),
+                    "now": now,
+                },
+            )
+        cur.execute(
+            """
+            INSERT INTO scratch.vehicle_identity_batch_progress
+                (vehicle_number, scored_at)
+            VALUES (%(vn)s, %(now)s)
+            ON CONFLICT (vehicle_number) DO UPDATE SET scored_at = EXCLUDED.scored_at
+            """,
+            {"vn": vehicle_number, "now": now},
+        )
+
+
+def _batch_worker() -> None:
+    """Continuously batch-score every not-yet-resolved bus in the background.
+
+    Runs from app startup for as long as the app is up, entirely
+    independent of the interactive review session (current_bus/
+    prefetch_generation) -- its own connection, its own progress tracking
+    (scratch.vehicle_identity_batch_progress), so it survives app restarts
+    and keeps working through the remaining pool whether or not anyone is
+    actively reviewing. Stops naturally once next_unscored_bus finds
+    nothing left.
+    """
+    while True:
+        vehicle_number = store.next_unscored_bus(store.batch_conn)
+        if vehicle_number is None:
+            return
+        _batch_score_bus(vehicle_number, store.batch_conn)
+
+
+threading.Thread(target=_batch_worker, daemon=True).start()
 
 
 def _speed_feature(
@@ -1003,7 +1309,7 @@ def _rank_candidates(
     trip: dict[str, Any],
     shapes: dict[tuple[Any, str, str], ShapeGeom],
     conn: psycopg.Connection,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], tuple[int, float] | None]:
     """Score EVERY AVL vehicle active in the trip window with the model.
 
     Uses find_candidates.py's aggregate_trip_candidates (numpy/bincount,
@@ -1021,10 +1327,16 @@ def _rank_candidates(
     DIFFERENT bus's real identity this month) and store.succ_* (a confident
     OTHER trip claims this vehicle_id during an overlapping time window,
     find_candidates.py's own exclusion).
+
+    Returns (top MAX_CANDIDATES_SHOWN candidates, overall top pick). The top
+    pick is the model's actual #1 choice across every scored candidate,
+    captured before prior-evidence forcing/truncation -- feeds the per-bus
+    model tally (see _record_model_tally), which needs the real answer even
+    for trips where the displayed top-10 got reordered.
     """
     scored, feature_rows = _score_all_candidates(trip, shapes, conn)
     if not scored:
-        return []
+        return [], None
 
     x_matrix = np.array(feature_rows, dtype=np.float64)
     p_valid = store.validity_model.predict_proba(x_matrix)[:, 1]
@@ -1048,6 +1360,13 @@ def _rank_candidates(
             else None
         )
 
+    # true overall top pick, captured before prior-evidence forces anything
+    # to the front -- this is what feeds the per-bus model tally, since a
+    # forced/truncated candidate list could otherwise hide the model's real
+    # #1 choice for this trip
+    top_j = int(np.argmax(p_valid))
+    top_pick = (scored[top_j]["candidate_vehicle_id"], float(p_valid[top_j]))
+
     # prior automatic evidence is always surfaced even if the model ranks it
     # lower; everything else ranks strictly by the model's own probability
     scored.sort(
@@ -1055,7 +1374,7 @@ def _rank_candidates(
     )
     forced = [c for c in scored if c["prior_evidence_trips"] > 0]
     rest = [c for c in scored if c["prior_evidence_trips"] == 0]
-    return (forced + rest)[:MAX_CANDIDATES_SHOWN]
+    return (forced + rest)[:MAX_CANDIDATES_SHOWN], top_pick
 
 
 def _clean(v: float | None) -> float | None:
@@ -1190,6 +1509,165 @@ def index() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+@app.get("/rapid")
+def rapid_index() -> FileResponse:
+    """Serve the rapid confirm/deny review UI."""
+    return FileResponse(Path(__file__).parent / "static" / "rapid.html")
+
+
+def _rapid_progress() -> dict[str, int]:
+    """Overall "how many buses left" snapshot for the rapid-review header."""
+    row = store.batch_conn.execute(
+        """
+        WITH all_buses AS (
+            SELECT DISTINCT vehicle_number FROM silver.afc_boardings
+            WHERE trip_opened_at >= '2023-11-01' AND trip_opened_at < '2023-12-01'
+        ),
+        resolved AS (
+            SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
+            UNION
+            SELECT vehicle_number FROM scratch.vehicle_identity_confirmed
+        )
+        SELECT
+            (SELECT count(*) FROM all_buses),
+            (SELECT count(*) FROM resolved),
+            (SELECT count(*) FROM scratch.vehicle_identity_batch_progress)
+        """
+    ).fetchone()
+    if row is None:
+        return {
+            "total_buses": 0,
+            "resolved_buses": 0,
+            "remaining_buses": 0,
+            "batch_scored_buses": 0,
+        }
+    total, resolved, batch_scored = row
+    return {
+        "total_buses": total,
+        "resolved_buses": resolved,
+        "remaining_buses": total - resolved,
+        "batch_scored_buses": batch_scored,
+    }
+
+
+@app.get("/api/rapid/next")
+def api_rapid_next() -> JSONResponse:
+    """Return the single most-confident (bus, candidate) pair still open.
+
+    "Most confident" = highest share of this bus's scored trips where the
+    model's own top pick was this candidate, tie-broken by raw trip count.
+    Works with whatever _batch_worker has scored so far -- the queue simply
+    grows as more buses get batch-scored in the background, and this
+    always just picks the best of what's currently available rather than
+    waiting for the whole pool to finish.
+    """
+    row = store.batch_conn.execute(
+        """
+        SELECT b.vehicle_number, b.candidate_vehicle_id, b.candidate_device_id,
+               b.n_trips_scored, b.n_trips_as_top_pick, b.avg_top_probability,
+               b.instances
+        FROM scratch.vehicle_identity_batch_scores b
+        WHERE b.vehicle_number NOT IN (
+            SELECT vehicle_number FROM scratch.november_2023_vehicle_identity
+        )
+        AND b.vehicle_number NOT IN (
+            SELECT vehicle_number FROM scratch.vehicle_identity_confirmed
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM scratch.vehicle_identity_batch_rejected r
+            WHERE r.vehicle_number = b.vehicle_number
+              AND r.candidate_vehicle_id = b.candidate_vehicle_id
+        )
+        AND b.candidate_vehicle_id NOT IN (
+            SELECT avl_vehicle_id FROM scratch.november_2023_vehicle_identity
+            WHERE avl_vehicle_id IS NOT NULL
+        )
+        AND b.candidate_vehicle_id NOT IN (
+            SELECT avl_vehicle_id FROM scratch.vehicle_identity_confirmed
+            WHERE avl_vehicle_id IS NOT NULL
+        )
+        ORDER BY
+            (b.n_trips_as_top_pick::float / NULLIF(b.n_trips_scored, 0)) DESC,
+            b.n_trips_as_top_pick DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    progress = _rapid_progress()
+    if row is None:
+        return JSONResponse({"done": True, "progress": progress})
+
+    vehicle_number, vid, device_id, n_scored, n_top, avg_prob, instances = row
+    rendered_instances = []
+    for inst in instances:
+        feed = date.fromisoformat(inst["resolved_feed_version_date"])
+        line = inst["line_number"]
+        shapes = store.shapes_latlon_for(feed, line, store.batch_conn)
+        opened = datetime.fromisoformat(inst["trip_opened_at"])
+        closed = datetime.fromisoformat(inst["trip_closed_at"])
+        pings = store.single_candidate_pings(vid, opened, closed, store.batch_conn)
+        rendered_instances.append(
+            {
+                "line_number": line,
+                "trip_opened_at": inst["trip_opened_at"],
+                "trip_closed_at": inst["trip_closed_at"],
+                "model_valid_probability": inst["model_valid_probability"],
+                "shapes": {
+                    shape_id: [{"lat": lat, "lon": lon} for lat, lon in pts]
+                    for shape_id, pts in shapes.items()
+                },
+                "pings": pings,
+            }
+        )
+
+    return JSONResponse(
+        {
+            "done": False,
+            "vehicle_number": vehicle_number,
+            "candidate_vehicle_id": vid,
+            "candidate_device_id": device_id,
+            "n_trips_scored": n_scored,
+            "n_trips_as_top_pick": n_top,
+            "avg_top_probability": round(avg_prob, 4) if avg_prob is not None else None,
+            "instances": rendered_instances,
+            "progress": progress,
+        }
+    )
+
+
+class RapidDenyIn(BaseModel):
+    """A "no, this candidate is wrong" decision in the rapid review flow."""
+
+    vehicle_number: str
+    candidate_vehicle_id: int
+
+
+@app.post("/api/rapid/deny")
+def api_rapid_deny(payload: RapidDenyIn) -> dict[str, Any]:
+    """Reject one (bus, candidate) pair.
+
+    /api/rapid/next never offers it again -- the next call naturally falls
+    through to that bus's next-best candidate (if
+    scratch.vehicle_identity_batch_scores has one) or a different bus
+    entirely. "Yes" doesn't need an equivalent endpoint here -- the rapid
+    UI just calls the existing /api/confirm directly.
+    """
+    store.batch_conn.execute(
+        """
+        INSERT INTO scratch.vehicle_identity_batch_rejected
+            (vehicle_number, candidate_vehicle_id, rejected_at)
+        VALUES (%(vn)s, %(vid)s, %(now)s)
+        ON CONFLICT (vehicle_number, candidate_vehicle_id) DO NOTHING
+        """,
+        {
+            "vn": payload.vehicle_number,
+            "vid": payload.candidate_vehicle_id,
+            "now": datetime.now(UTC),
+        },
+    )
+    return {"ok": True}
+
+
 @app.get("/api/next")
 def api_next(*, advance_bus: bool = False) -> JSONResponse:
     """Return the next (bus, trip) to review.
@@ -1223,15 +1701,33 @@ def api_next(*, advance_bus: bool = False) -> JSONResponse:
         vehicle_number = trip["vehicle_number"]
         cached = store.trip_cache.pop(_trip_key(trip), None)
 
-    payload = cached if cached is not None else _build_trip_payload(trip, store.conn)
+    if cached is not None:
+        payload = cached
+    else:
+        payload = _build_trip_payload(trip, store.conn)
+        with _lock:
+            _record_model_tally(_trip_key(trip), payload)
 
     candidate_ids = {c["candidate_vehicle_id"] for c in payload["candidates"]}
     confidence = _combined_confidence(vehicle_number, candidate_ids)
     for c in payload["candidates"]:
         c["confidence"] = confidence[c["candidate_vehicle_id"]]
 
+    with _lock:
+        model_tally_snapshot = {
+            "n_trips_scored": store.model_tally_trips_scored,
+            "n_trips_total": len(store.trip_list),
+            "candidates": sorted(
+                store.model_tally.items(), key=lambda kv: kv[1], reverse=True
+            )[:TALLY_TOP_N],
+        }
+
     return JSONResponse(
-        {**payload, "bus_tally": _bus_tally(vehicle_number, candidate_ids)}
+        {
+            **payload,
+            "bus_tally": _bus_tally(vehicle_number, candidate_ids),
+            "model_tally": model_tally_snapshot,
+        }
     )
 
 

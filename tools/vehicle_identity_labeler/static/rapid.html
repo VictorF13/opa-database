@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Rapid confirm/deny review</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; display: flex; flex-direction: column;
+         height: 100vh; background: #f3f4f6; color: #111827; }
+  header { padding: 8px 16px; background: #111827; color: #f3f4f6; display: flex; gap: 20px; align-items: center;
+           font-size: 13px; flex-wrap: wrap; }
+  header b { color: #fff; }
+  #progress-bar-wrap { flex: 1; min-width: 120px; height: 6px; background: #374151; border-radius: 3px; overflow: hidden; }
+  #progress-bar { height: 100%; background: #16a34a; width: 0%; transition: width 0.3s; }
+  #card { padding: 10px 16px; background: #eef2ff; border-bottom: 1px solid #c7d2fe; font-size: 13px;
+          display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #card b { font-size: 15px; }
+  .conf-tag { border-radius: 4px; padding: 2px 9px; font-size: 12px; font-weight: 700; }
+  .conf-high { background: #bbf7d0; color: #065f46; }
+  .conf-mid { background: #fde68a; color: #92400e; }
+  .conf-low { background: #e5e7eb; color: #4b5563; }
+  #instances { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex;
+               flex-direction: column; gap: 10px; }
+  .instance { background: #fff; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; }
+  .instance-head { padding: 5px 12px; font-size: 12px; font-weight: 600; background: #f9fafb;
+                    border-bottom: 1px solid #e5e7eb; display: flex; gap: 12px; }
+  .instance-head .stat { font-weight: 400; color: #4b5563; }
+  .maps { display: flex; height: 340px; }
+  .map-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid #e5e7eb; }
+  .map-wrap:last-child { border-right: none; }
+  .map-title { padding: 3px 10px; font-size: 11px; font-weight: 600; background: #f3f4f6; color: #111827; }
+  .map-box { flex: 1; }
+  .leaflet-tile-pane { filter: grayscale(45%) brightness(1.08); }
+  .label-tip { font-weight: 700; font-size: 10px; background: #111827 !important; color: #fff !important;
+               border: none !important; box-shadow: none !important; padding: 1px 5px !important; }
+  .label-tip::before { display: none !important; }
+  #panel { padding: 12px 16px; border-top: 1px solid #d1d5db; background: #fff; display: flex;
+           gap: 10px; align-items: center; flex-wrap: wrap; }
+  button { font-size: 15px; padding: 10px 20px; border-radius: 6px; border: 1px solid #9ca3af; cursor: pointer;
+           font-weight: 700; }
+  #yes-btn { border-color: #16a34a; background: #16a34a; color: #fff; }
+  #no-btn { border-color: #dc2626; background: #fff; color: #dc2626; }
+  #done { padding: 40px; text-align: center; font-size: 18px; color: #4b5563; }
+  a.switch { color: #9ca3af; font-size: 12px; text-decoration: none; }
+  a.switch:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<header>
+  <span><b id="remaining">-</b> buses remaining</span>
+  <span class="stat">(<span id="resolved">-</span>/<span id="total">-</span> resolved, <span id="batch-scored">-</span> batch-scored so far)</span>
+  <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+  <a class="switch" href="/">&larr; detailed review</a>
+</header>
+<div id="card"></div>
+<div id="instances"></div>
+<div id="panel">
+  <button id="yes-btn">Yes, correct &nbsp;<kbd>Y</kbd></button>
+  <button id="no-btn">No, wrong &nbsp;<kbd>N</kbd></button>
+  <span>Confirming writes straight to the strong dictionary; denying shows this bus's next-best candidate, if any.</span>
+</div>
+
+<script>
+const IDA_COLOR = "#2563eb";
+const VOLTA_COLOR = "#ea580c";
+let current = null;
+let liveMaps = [];
+
+function pct(v) { return v === null || v === undefined ? "-" : (v * 100).toFixed(0) + "%"; }
+function pingColor(i, n) {
+  const t = n <= 1 ? 0 : i / (n - 1);
+  const v = Math.round(255 * (1 - t));
+  return `rgb(${v},${v},${v})`;
+}
+function squareIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:12px;height:12px;background:${color};border:2px solid #111;"></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+  });
+}
+function confidenceClass(v) {
+  if (v === null || v === undefined) return "conf-low";
+  if (v >= 0.7) return "conf-high";
+  if (v >= 0.3) return "conf-mid";
+  return "conf-low";
+}
+function shapeIdFor(inst, suffix) {
+  return Object.keys(inst.shapes).find((sid) => sid.endsWith(suffix));
+}
+
+function drawDirectionMap(divId, inst, shapeId, color) {
+  const map = L.map(divId, { zoomControl: false, attributionControl: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, opacity: 0.45 }).addTo(map);
+
+  const bounds = [];
+  const path = inst.shapes[shapeId];
+  if (path && path.length) {
+    const latlngs = path.map((p) => [p.lat, p.lon]);
+    L.polyline(latlngs, { color, weight: 6, opacity: 0.8 }).addTo(map);
+    const startLL = latlngs[0];
+    const endLL = latlngs[latlngs.length - 1];
+    L.circleMarker(startLL, { radius: 8, color: "#065f46", weight: 2, fillColor: "#16a34a", fillOpacity: 1 })
+      .bindTooltip("START", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    L.marker(endLL, { icon: squareIcon("#dc2626") })
+      .bindTooltip("END", { permanent: true, direction: "top", className: "label-tip" }).addTo(map);
+    bounds.push(startLL, endLL, ...latlngs);
+  }
+
+  const n = inst.pings.length;
+  let prev = null;
+  inst.pings.forEach((p, i) => {
+    const ll = [p.lat, p.lon];
+    bounds.push(ll);
+    if (prev) L.polyline([prev, ll], { color: "#374151", weight: 1.2, opacity: 0.6 }).addTo(map);
+    L.circleMarker(ll, { radius: 3.5, color: "#111", weight: 0.6, fillColor: pingColor(i, n), fillOpacity: 1 }).addTo(map);
+    prev = ll;
+  });
+
+  requestAnimationFrame(() => {
+    map.invalidateSize();
+    if (bounds.length) map.fitBounds(bounds, { padding: [16, 16] });
+    else map.setView([-3.73, -38.53], 12);
+  });
+  return map;
+}
+
+function renderProgress(p) {
+  document.getElementById("remaining").textContent = p.remaining_buses;
+  document.getElementById("resolved").textContent = p.resolved_buses;
+  document.getElementById("total").textContent = p.total_buses;
+  document.getElementById("batch-scored").textContent = p.batch_scored_buses;
+  const donePct = p.total_buses ? (p.resolved_buses / p.total_buses) * 100 : 0;
+  document.getElementById("progress-bar").style.width = donePct + "%";
+}
+
+function renderDone(p) {
+  renderProgress(p);
+  document.getElementById("card").innerHTML = "";
+  document.getElementById("instances").innerHTML =
+    "<div id='done'>Nothing left in the rapid queue right now &mdash; either everything's resolved, " +
+    "or the background batch pass hasn't scored any more not-yet-rejected candidates yet. Check back shortly.</div>";
+  document.getElementById("yes-btn").disabled = true;
+  document.getElementById("no-btn").disabled = true;
+}
+
+function render(data) {
+  current = data;
+  liveMaps.forEach((m) => m.remove());
+  liveMaps = [];
+  renderProgress(data.progress);
+  document.getElementById("yes-btn").disabled = false;
+  document.getElementById("no-btn").disabled = false;
+
+  const cls = confidenceClass(data.n_trips_scored ? data.n_trips_as_top_pick / data.n_trips_scored : null);
+  document.getElementById("card").innerHTML = `
+    <span>Bus <b>${data.vehicle_number}</b> &rarr; vehicle_id <b>${data.candidate_vehicle_id}</b>
+      (device ${data.candidate_device_id || "?"})</span>
+    <span class="conf-tag ${cls}">${data.n_trips_as_top_pick}/${data.n_trips_scored} trips
+      (${pct(data.n_trips_scored ? data.n_trips_as_top_pick / data.n_trips_scored : null)})</span>
+    <span>avg probability ${pct(data.avg_top_probability)}</span>`;
+
+  const container = document.getElementById("instances");
+  container.innerHTML = "";
+  data.instances.forEach((inst, i) => {
+    const idaShapeId = shapeIdFor(inst, "-I");
+    const voltaShapeId = shapeIdFor(inst, "-V");
+    const div = document.createElement("div");
+    div.className = "instance";
+    div.innerHTML = `
+      <div class="instance-head">
+        <b>trip ${i + 1}/${data.instances.length}</b>
+        <span class="stat">line ${inst.line_number}</span>
+        <span class="stat">${new Date(inst.trip_opened_at).toLocaleString()} &rarr; ${new Date(inst.trip_closed_at).toLocaleTimeString()}</span>
+        <span class="stat">model ${pct(inst.model_valid_probability)}</span>
+      </div>
+      <div class="maps">
+        <div class="map-wrap"><div class="map-title"><span style="color:${IDA_COLOR}">&#9679;</span> ida${idaShapeId ? "" : " (no shape)"}</div>
+          <div id="map-${i}-ida" class="map-box"></div></div>
+        <div class="map-wrap"><div class="map-title"><span style="color:${VOLTA_COLOR}">&#9679;</span> volta${voltaShapeId ? "" : " (no shape)"}</div>
+          <div id="map-${i}-volta" class="map-box"></div></div>
+      </div>`;
+    container.appendChild(div);
+    if (idaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-ida`, inst, idaShapeId, IDA_COLOR));
+    if (voltaShapeId) liveMaps.push(drawDirectionMap(`map-${i}-volta`, inst, voltaShapeId, VOLTA_COLOR));
+  });
+}
+
+async function loadNext() {
+  const res = await fetch("/api/rapid/next");
+  const data = await res.json();
+  if (data.done) renderDone(data.progress);
+  else render(data);
+}
+
+async function confirm() {
+  if (!current) return;
+  await fetch("/api/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vehicle_number: current.vehicle_number,
+      avl_vehicle_id: current.candidate_vehicle_id,
+      device_id: current.candidate_device_id,
+      agreement_pct: current.n_trips_scored ? current.n_trips_as_top_pick / current.n_trips_scored : null,
+      confidence_lower_bound: null,
+      total_trials: current.n_trips_scored,
+    }),
+  });
+  loadNext();
+}
+
+async function deny() {
+  if (!current) return;
+  await fetch("/api/rapid/deny", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vehicle_number: current.vehicle_number,
+      candidate_vehicle_id: current.candidate_vehicle_id,
+    }),
+  });
+  loadNext();
+}
+
+document.getElementById("yes-btn").onclick = confirm;
+document.getElementById("no-btn").onclick = deny;
+document.addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() === "y") confirm();
+  else if (e.key.toLowerCase() === "n") deny();
+});
+
+loadNext();
+</script>
+</body>
+</html>
