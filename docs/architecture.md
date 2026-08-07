@@ -1,12 +1,11 @@
 # Architecture
 
 OPA Database ingests four raw sources describing Fortaleza's public transit
-system and moves them through three layers: **bronze** (typed raw data),
-**silver** (per-source normalized SQL tables), and **gold** (cross-source
-dimensional models). Each layer has a different job and deliberately does
-not do the next layer's work.
+system and moves them through two layers: **bronze** (typed raw data) and
+**silver** (per-source normalized SQL tables). Each layer has a different
+job and deliberately does not do the next layer's work.
 
-## Why three layers
+## Why two layers
 
 - **Bronze** exists to absorb the raw data's format problems once:
   inconsistent folder naming, headerless CSVs, deeply nested XML, GTFS's
@@ -16,11 +15,6 @@ not do the next layer's work.
   columns, PostGIS geometries, indexes, deduplication, and timezone
   correctness. It stays flat and per-source on purpose (see below): no
   cross-source joins, no denormalization removal.
-- **Gold** exists for everything that requires combining or reshaping
-  data: fact/dimension splits, surrogate keys, cross-source identity
-  resolution, and schedule-validity logic. It's a dbt project because that
-  kind of modeling benefits from being expressed, tested, and iterated on
-  as SQL rather than as pipeline code.
 
 ## Bronze layer
 
@@ -79,15 +73,13 @@ Source-specific notes worth knowing before touching an adapter:
   column holding that export's date; every other row of these two tables
   carries `null`. Unlike this section's other raw-format quirks, this one
   is deliberately *not* made fully invisible: the fact that data was
-  borrowed is preserved as a real column through silver and into gold
-  (`dim_gtfs_stop_time`, `dim_gtfs_service_date`), not swallowed at
-  bronze.
+  borrowed is preserved as a real column through silver
+  (`copied_from_feed_version_date`), not swallowed at bronze.
 - **Vehicle dictionary** (`adapters/vehicle_dictionary.py`): maps AFC's
   `cod_veiculo` to GPS's `id_veiculo`. `cod_veiculo` is not a reliable
   unique key even within one snapshot: buses get reassigned, so ~2% of
   codes map to more than one `id_veiculo`. Bronze keeps this as-is;
-  reconciling which mapping is current is deferred to gold
-  (`dim_vehicle_master`, see [`gold-layer.md`](gold-layer.md)).
+  reconciling which mapping is current is left to downstream consumers.
 
 ## Silver layer
 
@@ -142,12 +134,9 @@ for a hypothetical future violation.
 Silver stays **flat and per-source on purpose**. For example,
 `silver.afc_boardings` repeats every trip/line/vehicle/company attribute on
 every boarding row (measured ~16.4x redundancy) instead of being split into
-a trip/boarding fact-dimension pair. That split, along with any
-cross-source join (AFC vehicle identity vs. GPS vehicle identity, GTFS
-schedule validity, etc.), is gold's job. Dimensional modeling is much
-easier to iterate on as dbt SQL than as pipeline Python, and keeping silver
-a thin, obviously-correct typed mirror of the raw data makes it a stable
-foundation to model on top of.
+a trip/boarding fact-dimension pair. Keeping silver a thin,
+obviously-correct typed mirror of the raw data makes it a stable
+foundation for any downstream consumer to build on.
 
 ### Timezone handling
 
@@ -157,7 +146,7 @@ Both are localized/converted to proper `timestamptz` values during the
 silver load (`silver/afc.py`, `silver/avl.py`): a relabeling for AVL and
 a real timezone conversion for AFC. Reconciling AFC and AVL events
 against each other happens at silver time (each is independently correct
-in UTC) or later in gold, never in bronze.
+in UTC), never in bronze.
 
 ### PostGIS geometry columns
 
@@ -169,23 +158,11 @@ ever writes the plain lat/lon columns; Postgres computes and indexes the
 geometry itself, so there's no staging-table step needed to populate a
 generated column via `COPY`.
 
-## Gold layer
-
-Location: `gold/` (a self-contained dbt project). See
-[`gold-layer.md`](gold-layer.md) for the full model inventory, testing
-conventions, and how to run it. In short: gold is where the fact/dimension
-split of AFC happens, where a conformed vehicle dimension unifies AFC and
-GPS vehicle identities, and where every GTFS table gets a gold-layer
-counterpart so nothing needs to fall back to silver directly.
-
 ## Known gaps
 
-- No fact table yet joins AFC + AVL + GTFS together in one place (each
-  pairwise piece exists independently).
-- Referential integrity in gold is enforced via dbt tests, not actual
-  Postgres `FOREIGN KEY`/`PRIMARY KEY` constraints. dbt supports enforced
-  DDL-level constraints via "model contracts," not yet turned on.
-- No CI job runs the bronze/silver/gold pipeline end-to-end (would need a
+- No cross-source fact table yet joins AFC + AVL + GTFS together in one
+  place (each pairwise piece exists independently).
+- No CI job runs the bronze/silver pipeline end-to-end (would need a
   Postgres+PostGIS service container and sample data in GitHub Actions);
   CI currently only lints, type-checks, and runs the (currently empty)
   Python test suite.

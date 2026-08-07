@@ -9,8 +9,8 @@ split: `replace_period()`'s period here is the export date itself
 Every table is partitioned by day to match — each export IS one complete,
 self-contained snapshot, its true natural unit.
 `shapes`/`stops` get a generated PostGIS point per row; aggregating shape
-points into a `LINESTRING` per route is left for a gold/dbt model, same as
-the AFC trips/boardings normalization.
+points into a `LINESTRING` per route is left for a downstream consumer,
+same as the AFC trips/boardings normalization.
 """
 
 from __future__ import annotations

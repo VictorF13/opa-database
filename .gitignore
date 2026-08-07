@@ -13,14 +13,8 @@ wheels/
 # Environment variables
 .env
 
-# Local bronze/gold layer output
+# Local bronze/silver layer output
 data/
-
-# dbt-generated artifacts
-gold/target/
-gold/logs/
-gold/dbt_packages/
-gold/.user.yml
 
 # macOS
 .DS_Store
