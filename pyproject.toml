@@ -21,6 +21,8 @@ opa-database = "opa_database.cli:cli"
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
     "prek>=0.4.5",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
