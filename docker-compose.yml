@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgis/postgis:16-3.4
     environment:
-      POSTGRES_USER: ${SILVER_DB_USER:-opa}
-      POSTGRES_PASSWORD: ${SILVER_DB_PASSWORD:-opa}
-      POSTGRES_DB: ${SILVER_DB_NAME:-opa}
+      POSTGRES_USER: ${DB_USER:-opa}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-opa}
+      POSTGRES_DB: ${DB_NAME:-opa}
     ports:
       - "5432:5432"
     volumes:

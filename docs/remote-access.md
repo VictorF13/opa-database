@@ -16,7 +16,7 @@ postgresql://opa:opa@<tailscale-hostname>:5432/opa
 
 Replace `<tailscale-hostname>` with the Docker host's Tailscale MagicDNS
 name (e.g. `opa-server`), and the credentials with whatever
-`SILVER_DB_USER`/`SILVER_DB_PASSWORD`/`SILVER_DB_NAME` are set to in
+`DB_USER`/`DB_PASSWORD`/`DB_NAME` are set to in
 `.env` (defaults shown above).
 
 ## Browser-based access (Adminer)
