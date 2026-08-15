@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +11,12 @@ class Settings(BaseSettings):
     Settings are configured to be automatically read from environment variables, then
     a `.env` file, if they are not passed here.
 
+    `raw_data_root` is not checked for existence here: only the
+    bronze-ingest code path actually reads from disk, so a missing/wrong
+    path surfaces as a `FileNotFoundError` there instead, rather than
+    blocking every other use of `settings` (e.g. `db_dsn`-only scripts)
+    up front.
+
     Attributes:
         raw_data_root (Path): Path where the full raw data directory is located at.
         bronze_root (Path, optional): Path where the bronze layer parquets will be
@@ -20,22 +25,11 @@ class Settings(BaseSettings):
             database, provisioned via `docker compose up -d`. Shared by every
             schema (`silver`, `ml`, ...), not just `silver`.
 
-    Raises:
-        ValueError: If the `raw_data_root` passed or detected does not actually exist.
-
     """
 
     raw_data_root: Path
     bronze_root: Path = Path("./data/bronze")
     db_dsn: str = "postgresql://opa:opa@localhost:5432/opa"
-
-    @field_validator("raw_data_root")
-    @classmethod
-    def _must_exist(cls, v: Path) -> Path:
-        if not v.exists():
-            msg = f"raw_data_root does not exist: {v}"
-            raise ValueError(msg)
-        return v
 
     # extra="ignore": `.env` also carries DB_USER/PASSWORD/NAME, read
     # directly by `docker compose` for variable substitution rather than by
