@@ -16,7 +16,30 @@ if TYPE_CHECKING:
 SEED_SIZE = 50
 CALIBRATION_SIZE = 50
 TEST_SIZE = 50
-UNCERTAIN_DRAW_PROBABILITY = 0.75
+# Active-phase draws split so training and calibration+test grow at the
+# same overall rate, while calibration/test only ever receive genuinely
+# random rows (never uncertainty-picked ones, which would bias
+# evaluation): 1/3 uncertain -> train, and of the other 2/3 (random),
+# 1/4 -> train (diversity) / 3/4 -> calibration or test, whichever is
+# smaller. Overall that's exactly 1/3 + 2/3*1/4 = 1/2 -> train and
+# 2/3*3/4 = 1/2 -> calibration+test.
+UNCERTAIN_DRAW_PROBABILITY = 1 / 3
+RANDOM_DRAW_TRAIN_FRACTION = 1 / 4
+
+# Hard caps for the 500-label budget: 250 train + 125 calibration + 125
+# test. Once a set hits its cap it's excluded from selection entirely -
+# draws that would've gone there get redirected to whichever open set
+# is furthest below its own target, so the final split lands exactly on
+# these numbers instead of just converging toward them.
+TRAIN_CAP = 250
+CALIBRATION_CAP = 125
+TEST_CAP = 125
+_CAPS: dict[db.LabelSet, int] = {
+    "train": TRAIN_CAP,
+    "calibration": CALIBRATION_CAP,
+    "test": TEST_CAP,
+}
+_ALL_LABEL_SETS: tuple[db.LabelSet, ...] = ("train", "calibration", "test")
 
 
 @dataclass
@@ -47,18 +70,33 @@ def current_phase(counts: dict[db.LabelSet, int]) -> str:
     return "active"
 
 
+def _random_candidate(
+    conn: psycopg.Connection, label_set: db.LabelSet
+) -> Candidate | None:
+    trip_id = db.fetch_random_unlabeled_trip_id(conn)
+    if trip_id is None:
+        return None
+    return Candidate(trip_id=trip_id, label_set=label_set, selection_source="random")
+
+
 def draw_candidate(
     conn: psycopg.Connection, uncertain_queue: list[int]
 ) -> Candidate | None:
     """Draw the next trip to show the labeler.
 
     During the "calibration"/"test"/"seed" phases every draw is
-    uniformly random. During the "active" phase, most draws pop the
-    front of `uncertain_queue` (the current model's most-uncertain
-    remaining predictions, refreshed at each retrain); the rest are
-    random, so labeling stays a blind mix of both selection sources. A
-    skipped trip is never recorded anywhere, so it may resurface in a
-    later draw exactly like any other unlabeled trip.
+    uniformly random and feeds that phase's own set. During "active"
+    (see module docstring constants for the exact split), calibration
+    and test only ever grow from genuinely random draws - appended to
+    whichever currently has fewer rows, never reassigning a row already
+    labeled - so evaluation stays unbiased by the model's own picks.
+    Once a set hits its cap (`TRAIN_CAP`/`CALIBRATION_CAP`/`TEST_CAP`)
+    it stops receiving draws; anything that would've gone there is
+    redirected to whichever open set is furthest below its own target,
+    so the budget finishes at exactly 250/125/125 rather than merely
+    converging toward it. `None` once all three are full. A skipped
+    trip is never recorded anywhere, so it may resurface in a later
+    draw exactly like any other unlabeled trip.
 
     Args:
         conn: An open connection.
@@ -71,32 +109,48 @@ def draw_candidate(
     """
     counts = db.label_set_counts(conn)
     phase = current_phase(counts)
-    label_set: db.LabelSet
+
     if phase == "calibration":
-        label_set = "calibration"
-    elif phase == "test":
-        label_set = "test"
-    else:
-        label_set = "train"
+        return _random_candidate(conn, "calibration")
+    if phase == "test":
+        return _random_candidate(conn, "test")
+    if phase == "seed":
+        return _random_candidate(conn, "train")
 
-    trip_id: int | None = None
-    source: db.SelectionSource = "random"
+    # Remaining case: phase is "active".
+    open_sets = [s for s in _ALL_LABEL_SETS if counts[s] < _CAPS[s]]
+    if not open_sets:
+        return None
 
-    if phase == "active" and random.random() < UNCERTAIN_DRAW_PROBABILITY:  # noqa: S311
-        source = "uncertain"
+    if "train" in open_sets and random.random() < UNCERTAIN_DRAW_PROBABILITY:  # noqa: S311
         while uncertain_queue:
             candidate_id = uncertain_queue.pop(0)
             if db.is_unlabeled(conn, candidate_id):
-                trip_id = candidate_id
-                break
+                return Candidate(
+                    trip_id=candidate_id,
+                    label_set="train",
+                    selection_source="uncertain",
+                )
+        # Queue exhausted between retrains: fall through to a random draw.
 
-    if trip_id is None:
-        trip_id = db.fetch_random_unlabeled_trip_id(conn)
-        source = "random"
+    if random.random() < RANDOM_DRAW_TRAIN_FRACTION:  # noqa: S311
+        natural_target: db.LabelSet = "train"
+    else:
+        natural_target = (
+            "calibration" if counts["calibration"] <= counts["test"] else "test"
+        )
 
-    if trip_id is None:
-        return None
-    return Candidate(trip_id=trip_id, label_set=label_set, selection_source=source)
+    target = (
+        natural_target if natural_target in open_sets else _neediest(open_sets, counts)
+    )
+    return _random_candidate(conn, target)
+
+
+def _neediest(
+    open_sets: list[db.LabelSet], counts: dict[db.LabelSet, int]
+) -> db.LabelSet:
+    """Pick whichever open set is proportionally furthest below its own cap."""
+    return min(open_sets, key=lambda s: counts[s] / _CAPS[s])
 
 
 def build_uncertain_queue(
