@@ -2,11 +2,13 @@
 
 `CATEGORICAL_FEATURES` + `NUMERIC_FEATURES` together are every column of
 `ml.trip_validity_dataset` at or after `trip_duration_seconds` (its 16th
-column), plus `gtfs_route_has_both_directions`. Every identifier and the
-`avl_matched`/`avl_match_source` columns are deliberately excluded: AVL
-matching only decides which trips can be *shown* on the labeling map
-(it gates `ml.trip_validity_trip_positions`), it is not itself a model
-input.
+column), plus `gtfs_route_has_both_directions`, `weekday_number`, and
+`is_weekend` (all three added after the original 80-column build - see
+`05_final_dataset.ipynb`'s "Adding weekday/weekend features" section for
+the latter two). Every identifier and the `avl_matched`/`avl_match_source`
+columns are deliberately excluded: AVL matching only decides which trips
+can be *shown* on the labeling map (it gates
+`ml.trip_validity_trip_positions`), it is not itself a model input.
 """
 
 from __future__ import annotations
@@ -18,6 +20,11 @@ if TYPE_CHECKING:
 
 CATEGORICAL_FEATURES: list[str] = [
     "gtfs_route_has_both_directions",
+    # Treated as categorical (not a linear 1-7 ordinal) so a tree split
+    # can group non-contiguous days (e.g. {Sat, Sun}) in one step,
+    # instead of needing multiple threshold splits to approximate it.
+    "weekday_number",
+    "is_weekend",
 ]
 
 NUMERIC_FEATURES: list[str] = [
