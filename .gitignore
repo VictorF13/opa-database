@@ -6,6 +6,12 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache
+.pytest_cache
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv
@@ -15,6 +21,9 @@ wheels/
 
 # Local bronze/silver layer output
 data/
+
+# Claude Code local state
+.claude/
 
 # macOS
 .DS_Store
