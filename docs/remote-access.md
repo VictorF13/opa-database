@@ -11,13 +11,14 @@ IPs.
 For `psql`, DBeaver, Postico, TablePlus, or any other Postgres client:
 
 ```text
-postgresql://opa:opa@<tailscale-hostname>:5432/opa
+postgresql://<user>:<password>@<tailscale-hostname>:5432/opa
 ```
 
 Replace `<tailscale-hostname>` with the Docker host's Tailscale MagicDNS
-name (e.g. `opa-server`), and the credentials with whatever
-`DB_USER`/`DB_PASSWORD`/`DB_NAME` are set to in
-`.env` (defaults shown above).
+name (e.g. `opa-server`), and `<user>`/`<password>` with whatever
+`DB_USER`/`DB_PASSWORD` are actually set to in `.env` - there's no
+universal default account to fall back on; the original `opa` superuser
+was retired (`NOLOGIN`) in favor of a per-deployment admin account.
 
 ## Browser-based access (Adminer)
 
