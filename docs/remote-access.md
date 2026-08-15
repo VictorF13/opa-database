@@ -1,10 +1,16 @@
 # Remote database access
 
-The `docker-compose.yml` Postgres+PostGIS instance binds to `0.0.0.0`, so
-it's reachable from any device on the same network, not just the machine
-running Docker. This project accesses it remotely over
-[Tailscale](https://tailscale.com/), using MagicDNS names rather than raw
-IPs.
+The `docker-compose.yml` Postgres+PostGIS instance and Adminer bind to
+`BIND_HOST`, a `.env` variable defaulting to `127.0.0.1` (localhost-only,
+the right default for a fresh local dev setup with no remote access
+needed). To reach them over [Tailscale](https://tailscale.com/) instead,
+set `BIND_HOST` to the Docker host's own Tailscale IP (`tailscale ip
+-4`). Docker's port publishing needs a literal IP here; it can't resolve
+a Tailscale MagicDNS hostname directly, only raw IPs. That IP is stable
+for the life of the device (it doesn't change on reconnect or reboot),
+so it's safe to set once. Either way, connecting *to* it still uses the
+Tailscale MagicDNS hostname (e.g. `opa-server`), not the raw IP; only
+the bind side needs the IP.
 
 ## Direct Postgres connection
 
@@ -26,17 +32,16 @@ was retired (`NOLOGIN`) in favor of a per-deployment admin account.
 lightweight web-based SQL client, on port 8080, so no local Postgres
 client install is needed.
 
-- **On the host machine, or over plain Tailscale IP/hostname**:
-  `http://<tailscale-hostname>:8080`
-- **Clean HTTPS URL, no port** (via `tailscale serve`): once configured
-  (see below), the same UI is reachable at
-  `https://<tailscale-hostname>.<tailnet-name>.ts.net`.
+- **Primary way, for now**: `http://<tailscale-hostname>:8080`.
+- **Optional, not currently set up**: a clean HTTPS URL with no port,
+  via `tailscale serve` (see below) - once configured, the same UI is
+  reachable at `https://<tailscale-hostname>.<tailnet-name>.ts.net`.
 
 Adminer login: System **PostgreSQL**, Server `postgres` (the
 `docker-compose.yml` service name), then the same user/password/database
 as above.
 
-### Setting up `tailscale serve` for a clean URL
+### Setting up `tailscale serve` for a clean URL (optional, not in use)
 
 `tailscale serve --bg 8080` reverse-proxies Adminer behind a proper HTTPS
 URL instead of `host:8080`. This requires two one-time steps on the Docker

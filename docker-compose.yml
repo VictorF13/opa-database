@@ -6,14 +6,14 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-opa}
       POSTGRES_DB: ${DB_NAME:-opa}
     ports:
-      - "5432:5432"
+      - "${BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
       - opa_postgres_data:/var/lib/postgresql/data
 
   adminer:
     image: adminer
     ports:
-      - "8080:8080"
+      - "${BIND_HOST:-127.0.0.1}:8080:8080"
     depends_on:
       - postgres
 

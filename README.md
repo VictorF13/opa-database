@@ -83,6 +83,7 @@ docker compose up -d   # starts Postgres+PostGIS on :5432 and Adminer on :8080
 | `BRONZE_ROOT` | Where bronze Parquet files are written |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Postgres credentials, used both by `docker compose` and by the app |
 | `DB_DSN` | Full connection string the pipeline uses to reach Postgres. Shared by every schema (`silver`, `ml`, ...), not silver-specific |
+| `BIND_HOST` | Optional. Network interface Postgres/Adminer bind to, defaults to `127.0.0.1` (localhost-only). See [`docs/remote-access.md`](docs/remote-access.md) to expose them over Tailscale instead |
 
 ### Running the pipeline
 
