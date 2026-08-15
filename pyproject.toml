@@ -28,6 +28,16 @@ dev = [
     "ruff>=0.15.18",
     "ty>=0.0.51",
 ]
+ml = [
+    "folium>=0.20.0",
+    "joblib>=1.5.3",
+    "lightgbm>=4.7.0",
+    "optuna>=4.9.0",
+    "pandas>=3.0.5",
+    "scikit-learn>=1.9.0",
+    "streamlit>=1.61.1",
+    "streamlit-folium>=0.27.4",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,7 +52,8 @@ lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
 "*.ipynb" = ["T201"]
 
 [tool.ty]
-src.include = ["src", "tests"]
+src.include = ["src", "tests", "ml/trip_validity_model/app"]
+environment.extra-paths = ["ml/trip_validity_model/app"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
