@@ -39,10 +39,35 @@ CREATE TABLE IF NOT EXISTS silver.avl_pings (
 
 # Created on each partition after it's bulk-loaded, rather than
 # incrementally maintained per-row during COPY (see replace_period's
-# docstring).
+# docstring). vehicle_ts_idx/device_ts_idx exist for matching AVL pings
+# to a specific vehicle+time window efficiently (e.g. the Trip Validity
+# model's per-trip position lookup) -- without them, that kind of query
+# has to fall back to a full partition scan. latitude/longitude/speed/
+# odometer ride along as INCLUDE columns (not part of the key) so a
+# lookup like that can be satisfied as an index-only scan -- without
+# them, Postgres still has to fetch the heap page for every matching
+# row just to read those columns, which in practice is the dominant
+# cost (random I/O against a 100M+-row partition), confirmed live via
+# EXPLAIN (ANALYZE, BUFFERS) while building the Trip Validity model.
 _INDEXES = (
     IndexSpec("geom_idx", unique=False, definition="USING GIST (geom)"),
     IndexSpec("ts_idx", unique=False, definition="(metric_timestamp)"),
+    IndexSpec(
+        "vehicle_ts_idx",
+        unique=False,
+        definition=(
+            "(vehicle_id, metric_timestamp) "
+            "INCLUDE (latitude, longitude, speed, odometer)"
+        ),
+    ),
+    IndexSpec(
+        "device_ts_idx",
+        unique=False,
+        definition=(
+            "(device_id, metric_timestamp) "
+            "INCLUDE (latitude, longitude, speed, odometer)"
+        ),
+    ),
 )
 
 _DECEMBER = 12
