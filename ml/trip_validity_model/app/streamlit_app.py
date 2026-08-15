@@ -176,7 +176,11 @@ def _rebuild_uncertain_queue(conn: psycopg.Connection) -> None:
         st.session_state.uncertain_queue = []
         return
     labelable_pool = cast_feature_dtypes(
-        db.fetch_unlabeled_pool(conn, labelable_only=True)
+        db.fetch_unlabeled_pool(
+            conn,
+            labelable_only=True,
+            exclude_trip_ids=st.session_state.skipped_trip_ids,
+        )
     )
     if labelable_pool.empty:
         st.session_state.uncertain_queue = []
@@ -200,7 +204,7 @@ def _ensure_candidate(conn: psycopg.Connection) -> None:
         with st.spinner("Refreshing uncertainty ranking..."):
             _rebuild_uncertain_queue(conn)
     st.session_state.candidate = sampling.draw_candidate(
-        conn, st.session_state.uncertain_queue
+        conn, st.session_state.uncertain_queue, st.session_state.skipped_trip_ids
     )
 
 
@@ -351,6 +355,7 @@ def _render_decision_buttons(
             conn, candidate, label=False, predicted_probability=predicted_probability
         )
     if skip_col.button("Skip", width="stretch"):
+        st.session_state.skipped_trip_ids.add(candidate.trip_id)
         st.session_state.candidate = None
         st.rerun()
 
@@ -362,16 +367,25 @@ def main() -> None:
         st.session_state.model_state = _load_latest_model(conn)
     if "uncertain_queue" not in st.session_state:
         st.session_state.uncertain_queue = []
+    if "skipped_trip_ids" not in st.session_state:
+        # Session-only: never written to the database (a skip means
+        # "pretend I never saw it"), so this resets on every app restart.
+        st.session_state.skipped_trip_ids = set()
 
     st.subheader("Trip Validity — Active Learning Labeler")
 
     counts = db.label_set_counts(conn)
     phase = sampling.current_phase(counts)
+    total_budget = sampling.TRAIN_CAP + sampling.CALIBRATION_CAP + sampling.TEST_CAP
+    total_labeled = counts["train"] + counts["calibration"] + counts["test"]
     st.caption(
-        f"Calibration {counts['calibration']}/{sampling.CALIBRATION_SIZE} · "
-        f"Test {counts['test']}/{sampling.TEST_SIZE} · "
-        f"Train {counts['train']} · Phase: {phase}"
+        f"**{total_labeled}/{total_budget} labeled** "
+        f"({total_budget - total_labeled} to go) · "
+        f"Calibration {counts['calibration']}/{sampling.CALIBRATION_CAP} · "
+        f"Test {counts['test']}/{sampling.TEST_CAP} · "
+        f"Train {counts['train']}/{sampling.TRAIN_CAP} · Phase: {phase}"
     )
+    st.progress(min(total_labeled / total_budget, 1.0))
 
     _ensure_candidate(conn)
     candidate: sampling.Candidate | None = st.session_state.candidate

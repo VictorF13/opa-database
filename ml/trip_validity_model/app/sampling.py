@@ -10,6 +10,8 @@ import db
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     import pandas as pd
     import psycopg
 
@@ -71,16 +73,20 @@ def current_phase(counts: dict[db.LabelSet, int]) -> str:
 
 
 def _random_candidate(
-    conn: psycopg.Connection, label_set: db.LabelSet
+    conn: psycopg.Connection,
+    label_set: db.LabelSet,
+    exclude_trip_ids: Collection[int],
 ) -> Candidate | None:
-    trip_id = db.fetch_random_unlabeled_trip_id(conn)
+    trip_id = db.fetch_random_unlabeled_trip_id(conn, exclude_trip_ids=exclude_trip_ids)
     if trip_id is None:
         return None
     return Candidate(trip_id=trip_id, label_set=label_set, selection_source="random")
 
 
 def draw_candidate(
-    conn: psycopg.Connection, uncertain_queue: list[int]
+    conn: psycopg.Connection,
+    uncertain_queue: list[int],
+    exclude_trip_ids: Collection[int] = (),
 ) -> Candidate | None:
     """Draw the next trip to show the labeler.
 
@@ -94,14 +100,17 @@ def draw_candidate(
     it stops receiving draws; anything that would've gone there is
     redirected to whichever open set is furthest below its own target,
     so the budget finishes at exactly 250/125/125 rather than merely
-    converging toward it. `None` once all three are full. A skipped
-    trip is never recorded anywhere, so it may resurface in a later
-    draw exactly like any other unlabeled trip.
+    converging toward it. `None` once all three are full (or, given
+    `exclude_trip_ids`, once everything left has been excluded).
 
     Args:
         conn: An open connection.
         uncertain_queue: Mutated in place — a trip_id popped from here
             is removed.
+        exclude_trip_ids: Trip_ids to never draw, e.g. this session's
+            skipped trips. Deliberately not persisted to the database
+            (a skip means "pretend I never saw it"), so this only ever
+            reflects the current run - restarting the app clears it.
 
     Returns:
         The next `Candidate`, or `None` if nothing is left to label.
@@ -111,11 +120,11 @@ def draw_candidate(
     phase = current_phase(counts)
 
     if phase == "calibration":
-        return _random_candidate(conn, "calibration")
+        return _random_candidate(conn, "calibration", exclude_trip_ids)
     if phase == "test":
-        return _random_candidate(conn, "test")
+        return _random_candidate(conn, "test", exclude_trip_ids)
     if phase == "seed":
-        return _random_candidate(conn, "train")
+        return _random_candidate(conn, "train", exclude_trip_ids)
 
     # Remaining case: phase is "active".
     open_sets = [s for s in _ALL_LABEL_SETS if counts[s] < _CAPS[s]]
@@ -125,6 +134,8 @@ def draw_candidate(
     if "train" in open_sets and random.random() < UNCERTAIN_DRAW_PROBABILITY:  # noqa: S311
         while uncertain_queue:
             candidate_id = uncertain_queue.pop(0)
+            if candidate_id in exclude_trip_ids:
+                continue
             if db.is_unlabeled(conn, candidate_id):
                 return Candidate(
                     trip_id=candidate_id,
@@ -143,7 +154,7 @@ def draw_candidate(
     target = (
         natural_target if natural_target in open_sets else _neediest(open_sets, counts)
     )
-    return _random_candidate(conn, target)
+    return _random_candidate(conn, target, exclude_trip_ids)
 
 
 def _neediest(

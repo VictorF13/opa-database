@@ -58,3 +58,36 @@ class PlattCalibrator:
             "coefficient": float(self._model.coef_[0, 0]),
             "intercept": float(self._model.intercept_[0]),
         }
+
+    def to_sklearn_model(self) -> LogisticRegression:
+        """Return the underlying fitted sklearn model.
+
+        For artifact storage: pickling this class directly ties the
+        artifact to *this exact* `PlattCalibrator` class object, which
+        breaks (`PicklingError`) if the `calibration` module gets
+        hot-reloaded (e.g. by Streamlit's file watcher during dev)
+        between when an instance was created and when it's pickled -
+        the reloaded module's class is a distinct object with the same
+        name. Storing/restoring the plain sklearn model instead
+        sidesteps that entirely.
+
+        Returns:
+            The fitted `LogisticRegression`.
+
+        """
+        return self._model
+
+    @classmethod
+    def from_sklearn_model(cls, model: LogisticRegression) -> PlattCalibrator:
+        """Reconstruct a calibrator from a model saved via `to_sklearn_model`.
+
+        Args:
+            model: A previously fitted `LogisticRegression`.
+
+        Returns:
+            A `PlattCalibrator` wrapping it.
+
+        """
+        calibrator = cls()
+        calibrator._model = model
+        return calibrator

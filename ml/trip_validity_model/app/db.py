@@ -20,7 +20,7 @@ from psycopg import sql
 from opa_database.config import settings
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
 LabelSet = Literal["calibration", "test", "train"]
 SelectionSource = Literal["random", "uncertain"]
@@ -74,7 +74,9 @@ def label_set_counts(conn: psycopg.Connection) -> dict[LabelSet, int]:
     return counts
 
 
-def fetch_random_unlabeled_trip_id(conn: psycopg.Connection) -> int | None:
+def fetch_random_unlabeled_trip_id(
+    conn: psycopg.Connection, *, exclude_trip_ids: Collection[int] = ()
+) -> int | None:
     """Draw one uniformly random trip that is labelable and not yet labeled.
 
     "Labelable" means it has at least one actual AVL position row, not
@@ -83,10 +85,14 @@ def fetch_random_unlabeled_trip_id(conn: psycopg.Connection) -> int | None:
 
     Args:
         conn: An open connection.
+        exclude_trip_ids: Additional trip_ids to exclude beyond what's
+            already labeled - e.g. this session's skipped trips, which
+            are deliberately never written to the database but shouldn't
+            resurface within the same run.
 
     Returns:
         A `trip_id`, or `None` if every trip with AVL positions has been
-        labeled.
+        labeled or excluded.
 
     """
     with conn.cursor() as cur:
@@ -99,7 +105,10 @@ def fetch_random_unlabeled_trip_id(conn: psycopg.Connection) -> int | None:
             ") "
             "AND NOT EXISTS ("
             "    SELECT 1 FROM ml.trip_validity_labels l WHERE l.trip_id = d.trip_id"
-            ") ORDER BY random() LIMIT 1;"
+            ") "
+            "AND NOT (d.trip_id = ANY(%s)) "
+            "ORDER BY random() LIMIT 1;",
+            (list(exclude_trip_ids),),
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -257,7 +266,10 @@ def fetch_label_set(conn: psycopg.Connection, label_set: LabelSet) -> pd.DataFra
 
 
 def fetch_unlabeled_pool(
-    conn: psycopg.Connection, *, labelable_only: bool
+    conn: psycopg.Connection,
+    *,
+    labelable_only: bool,
+    exclude_trip_ids: Collection[int] = (),
 ) -> pd.DataFrame:
     """Fetch every not-yet-labeled row's feature columns.
 
@@ -270,6 +282,9 @@ def fetch_unlabeled_pool(
             time window. If `False`, cover the full remaining dataset
             (used for the interim/final confidence count over the whole
             ~1M-row table).
+        exclude_trip_ids: Additional trip_ids to exclude beyond what's
+            already labeled - e.g. this session's skipped trips, so they
+            can't be ranked back into the active-learning candidate pool.
 
     Returns:
         A frame with `trip_id` and every column in `ALL_FEATURES`.
@@ -289,9 +304,9 @@ def fetch_unlabeled_pool(
         "SELECT d.trip_id, {features} FROM ml.trip_validity_dataset d "
         "WHERE NOT EXISTS ("
         "    SELECT 1 FROM ml.trip_validity_labels l WHERE l.trip_id = d.trip_id"
-        ") {filter};"
+        ") {filter} AND NOT (d.trip_id = ANY(%s));"
     ).format(features=_FEATURE_COLUMNS_SQL, filter=filter_clause)
-    return _fetch_frame(conn, query)
+    return _fetch_frame(conn, query, (list(exclude_trip_ids),))
 
 
 def insert_model_run(conn: psycopg.Connection, run: dict[str, Any]) -> int:
