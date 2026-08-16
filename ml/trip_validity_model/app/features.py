@@ -8,8 +8,10 @@ column), plus columns added after the original 80-column build (see
 `trip_start_distance_to_nearest_garage_meters`,
 `trip_end_distance_to_nearest_garage_meters`,
 `route_i_straight_line_meters`, `route_i_straight_line_ratio`,
-`route_v_straight_line_meters`, and `route_v_straight_line_ratio`.
-Every identifier and the `avl_matched`/`avl_match_source` columns are
+`route_v_straight_line_meters`, `route_v_straight_line_ratio`, and the
+six `trip_start`/`trip_end`
+`_distance_to_nearest_[open/closed_]terminal_meters` columns. Every
+identifier and the `avl_matched`/`avl_match_source` columns are
 deliberately excluded: AVL matching only decides which trips can be
 *shown* on the labeling map (it gates
 `ml.trip_validity_trip_positions`), it is not itself a model input -
@@ -118,6 +120,16 @@ NUMERIC_FEATURES: list[str] = [
     "route_i_straight_line_ratio",
     "route_v_straight_line_meters",
     "route_v_straight_line_ratio",
+    # Distance (meters) from this trip's first/last geo-tagged AFC fare
+    # tap to the nearest bus terminal - any/open-only/closed-only,
+    # deliberately built from fare taps, never AVL (see module
+    # docstring). NULL for trips with zero geo-tagged fares.
+    "trip_start_distance_to_nearest_terminal_meters",
+    "trip_start_distance_to_nearest_open_terminal_meters",
+    "trip_start_distance_to_nearest_closed_terminal_meters",
+    "trip_end_distance_to_nearest_terminal_meters",
+    "trip_end_distance_to_nearest_open_terminal_meters",
+    "trip_end_distance_to_nearest_closed_terminal_meters",
 ]
 
 ALL_FEATURES: list[str] = [*CATEGORICAL_FEATURES, *NUMERIC_FEATURES]
