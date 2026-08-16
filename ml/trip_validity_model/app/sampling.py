@@ -28,6 +28,16 @@ TEST_SIZE = 50
 UNCERTAIN_DRAW_PROBABILITY = 1 / 3
 RANDOM_DRAW_TRAIN_FRACTION = 1 / 4
 
+# Once calibration and test are both capped, every remaining draw feeds
+# train regardless (see the redirect-to-neediest-open-set logic below),
+# so RANDOM_DRAW_TRAIN_FRACTION stops mattering - there's no more eval
+# pool to protect from uncertainty bias. At that point the uncertain
+# probability rises to 3/4, since diversity sampling was only there to
+# keep train's *distribution* broad while calibration/test still needed
+# feeding; once train is the only open set, leaning harder into the
+# model's own uncertain cases is the better use of the remaining budget.
+UNCERTAIN_DRAW_PROBABILITY_EVAL_CLOSED = 3 / 4
+
 # Hard caps for the 500-label budget: 250 train + 125 calibration + 125
 # test. Once a set hits its cap it's excluded from selection entirely -
 # draws that would've gone there get redirected to whichever open set
@@ -100,8 +110,12 @@ def draw_candidate(
     it stops receiving draws; anything that would've gone there is
     redirected to whichever open set is furthest below its own target,
     so the budget finishes at exactly 250/125/125 rather than merely
-    converging toward it. `None` once all three are full (or, given
-    `exclude_trip_ids`, once everything left has been excluded).
+    converging toward it. Once calibration and test are *both* capped,
+    the uncertain-draw probability itself rises from 1/3 to
+    `UNCERTAIN_DRAW_PROBABILITY_EVAL_CLOSED` (3/4), since every draw is
+    going to train regardless and there's no more eval pool left to
+    protect from uncertainty bias. `None` once all three are full (or,
+    given `exclude_trip_ids`, once everything left has been excluded).
 
     Args:
         conn: An open connection.
@@ -131,7 +145,13 @@ def draw_candidate(
     if not open_sets:
         return None
 
-    if "train" in open_sets and random.random() < UNCERTAIN_DRAW_PROBABILITY:  # noqa: S311
+    eval_sets_closed = "calibration" not in open_sets and "test" not in open_sets
+    uncertain_probability = (
+        UNCERTAIN_DRAW_PROBABILITY_EVAL_CLOSED
+        if eval_sets_closed
+        else UNCERTAIN_DRAW_PROBABILITY
+    )
+    if "train" in open_sets and random.random() < uncertain_probability:  # noqa: S311
         while uncertain_queue:
             candidate_id = uncertain_queue.pop(0)
             if candidate_id in exclude_trip_ids:
