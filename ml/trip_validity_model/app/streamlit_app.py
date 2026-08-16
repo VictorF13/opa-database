@@ -332,8 +332,9 @@ def _handle_decision(
     )
     st.session_state.candidate = None
     if candidate.label_set == "train":
-        n_train_labels = db.label_set_counts(conn)["train"]
-        run_type = sampling.landmark_crossed(n_train_labels)
+        counts = db.label_set_counts(conn)
+        n_train_labels = counts["train"]
+        run_type = sampling.landmark_crossed(n_train_labels, counts)
         if run_type is not None:
             with st.spinner(f"Running {run_type} retrain..."):
                 _run_training_cycle(conn, run_type, n_train_labels)

@@ -54,6 +54,21 @@ _CAPS: dict[db.LabelSet, int] = {
 _ALL_LABEL_SETS: tuple[db.LabelSet, ...] = ("train", "calibration", "test")
 
 
+def eval_sets_closed(counts: dict[db.LabelSet, int]) -> bool:
+    """Check whether both eval sets are full.
+
+    Args:
+        counts: Output of `db.label_set_counts`.
+
+    Returns:
+        True once calibration and test have both reached their caps -
+        every draw feeds train from that point on, and (per
+        `landmark_crossed`) every retrain runs full optimization.
+
+    """
+    return counts["calibration"] >= CALIBRATION_CAP and counts["test"] >= TEST_CAP
+
+
 @dataclass
 class Candidate:
     """One trip drawn for labeling."""
@@ -145,10 +160,9 @@ def draw_candidate(
     if not open_sets:
         return None
 
-    eval_sets_closed = "calibration" not in open_sets and "test" not in open_sets
     uncertain_probability = (
         UNCERTAIN_DRAW_PROBABILITY_EVAL_CLOSED
-        if eval_sets_closed
+        if eval_sets_closed(counts)
         else UNCERTAIN_DRAW_PROBABILITY
     )
     if "train" in open_sets and random.random() < uncertain_probability:  # noqa: S311
@@ -208,17 +222,25 @@ def build_uncertain_queue(
     return unlabeled_pool["trip_id"].to_numpy()[order].tolist()
 
 
-def landmark_crossed(n_train_labels: int) -> str | None:
+def landmark_crossed(n_train_labels: int, counts: dict[db.LabelSet, int]) -> str | None:
     """Check whether the training pool just crossed a retrain/retune landmark.
 
     Args:
         n_train_labels: Training pool size *after* the label was added.
+        counts: Output of `db.label_set_counts`, used to check whether
+            both eval sets are already full (see `eval_sets_closed`).
 
     Returns:
         "milestone" every 50 labels (this also covers the very first
-        model, trained once the 50-row seed pool is complete), "cycle"
-        every 15 labels otherwise, `None` if neither (or the seed pool
-        isn't complete yet).
+        model, trained once the 50-row seed pool is complete). Every
+        15 labels otherwise: "cycle" while calibration/test are still
+        filling, or "milestone" once both are full - at that point
+        every remaining draw feeds train anyway (`draw_candidate`), so
+        there's no reason left to hold back full hyperparameter/feature
+        optimization for eval-set-growth's sake; every retrain gets the
+        full treatment instead of just every 50th one. `None` if
+        neither landmark was crossed (or the seed pool isn't complete
+        yet).
 
     """
     if n_train_labels < SEED_SIZE:
@@ -226,5 +248,5 @@ def landmark_crossed(n_train_labels: int) -> str | None:
     if n_train_labels % 50 == 0:
         return "milestone"
     if n_train_labels % 15 == 0:
-        return "cycle"
+        return "milestone" if eval_sets_closed(counts) else "cycle"
     return None
