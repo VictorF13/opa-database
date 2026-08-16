@@ -5,12 +5,15 @@
 column), plus columns added after the original 80-column build (see
 `05_final_dataset.ipynb`): `gtfs_route_has_both_directions`,
 `weekday_number`, `is_weekend`, `company_id`,
-`trip_start_distance_to_nearest_garage_meters`, and
-`trip_end_distance_to_nearest_garage_meters`. Every identifier and the
-`avl_matched`/`avl_match_source` columns are deliberately excluded: AVL
-matching only decides which trips can be *shown* on the labeling map
-(it gates `ml.trip_validity_trip_positions`), it is not itself a model
-input - the model must never see AVL data, by design.
+`trip_start_distance_to_nearest_garage_meters`,
+`trip_end_distance_to_nearest_garage_meters`,
+`route_i_straight_line_meters`, `route_i_straight_line_ratio`,
+`route_v_straight_line_meters`, and `route_v_straight_line_ratio`.
+Every identifier and the `avl_matched`/`avl_match_source` columns are
+deliberately excluded: AVL matching only decides which trips can be
+*shown* on the labeling map (it gates
+`ml.trip_validity_trip_positions`), it is not itself a model input -
+the model must never see AVL data, by design.
 """
 
 from __future__ import annotations
@@ -106,6 +109,15 @@ NUMERIC_FEATURES: list[str] = [
     # trips with zero geo-tagged fares; LightGBM handles NaN natively.
     "trip_start_distance_to_nearest_garage_meters",
     "trip_end_distance_to_nearest_garage_meters",
+    # Straight-line (not road-following) distance between a route's own
+    # start/end point, and that distance as a fraction of the route's
+    # actual length (bounded [0, 1] by the triangle inequality) - a
+    # measure of how direct vs. winding/loop-shaped the route is. NULL
+    # for a direction with no matched GTFS shape.
+    "route_i_straight_line_meters",
+    "route_i_straight_line_ratio",
+    "route_v_straight_line_meters",
+    "route_v_straight_line_ratio",
 ]
 
 ALL_FEATURES: list[str] = [*CATEGORICAL_FEATURES, *NUMERIC_FEATURES]
