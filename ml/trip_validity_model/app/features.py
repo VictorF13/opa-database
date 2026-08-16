@@ -2,13 +2,15 @@
 
 `CATEGORICAL_FEATURES` + `NUMERIC_FEATURES` together are every column of
 `ml.trip_validity_dataset` at or after `trip_duration_seconds` (its 16th
-column), plus `gtfs_route_has_both_directions`, `weekday_number`, and
-`is_weekend` (all three added after the original 80-column build - see
-`05_final_dataset.ipynb`'s "Adding weekday/weekend features" section for
-the latter two). Every identifier and the `avl_matched`/`avl_match_source`
-columns are deliberately excluded: AVL matching only decides which trips
-can be *shown* on the labeling map (it gates
-`ml.trip_validity_trip_positions`), it is not itself a model input.
+column), plus columns added after the original 80-column build (see
+`05_final_dataset.ipynb`): `gtfs_route_has_both_directions`,
+`weekday_number`, `is_weekend`, `company_id`,
+`trip_start_distance_to_nearest_garage_meters`, and
+`trip_end_distance_to_nearest_garage_meters`. Every identifier and the
+`avl_matched`/`avl_match_source` columns are deliberately excluded: AVL
+matching only decides which trips can be *shown* on the labeling map
+(it gates `ml.trip_validity_trip_positions`), it is not itself a model
+input - the model must never see AVL data, by design.
 """
 
 from __future__ import annotations
@@ -25,6 +27,11 @@ CATEGORICAL_FEATURES: list[str] = [
     # instead of needing multiple threshold splits to approximate it.
     "weekday_number",
     "is_weekend",
+    # The operator registry code (e.g. "02", "67") - text, not a number
+    # (leading zero significant), and has no meaningful ordering, so a
+    # tree split needs to be able to group arbitrary subsets of
+    # companies rather than threshold a fake numeric ID.
+    "company_id",
 ]
 
 NUMERIC_FEATURES: list[str] = [
@@ -93,6 +100,12 @@ NUMERIC_FEATURES: list[str] = [
     "trip_progress_correlation_to_i",
     "trip_progress_correlation_to_v",
     "trip_progress_correlation_n_points",
+    # Distance (meters) from this trip's first/last geo-tagged AFC fare
+    # tap to the nearest garage of its operating company - deliberately
+    # built from fare taps, never AVL (see module docstring). NULL for
+    # trips with zero geo-tagged fares; LightGBM handles NaN natively.
+    "trip_start_distance_to_nearest_garage_meters",
+    "trip_end_distance_to_nearest_garage_meters",
 ]
 
 ALL_FEATURES: list[str] = [*CATEGORICAL_FEATURES, *NUMERIC_FEATURES]
