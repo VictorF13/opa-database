@@ -38,6 +38,14 @@ RANDOM_DRAW_TRAIN_FRACTION = 1 / 4
 # model's own uncertain cases is the better use of the remaining budget.
 UNCERTAIN_DRAW_PROBABILITY_EVAL_CLOSED = 3 / 4
 
+# Same reasoning applied to retrain cadence: once eval sets are closed
+# every retrain is already a full "milestone" one (see
+# landmark_crossed), so there's no separate lighter "cycle" retrain left
+# to space further apart - retraining on fresher data more often is
+# pure upside. Replaces the 15/50-label schedule entirely rather than
+# tightening it, since 5 already divides evenly into both.
+RETRAIN_INTERVAL_EVAL_CLOSED = 5
+
 # Hard caps for the 500-label budget: 250 train + 125 calibration + 125
 # test. Once a set hits its cap it's excluded from selection entirely -
 # draws that would've gone there get redirected to whichever open set
@@ -231,22 +239,26 @@ def landmark_crossed(n_train_labels: int, counts: dict[db.LabelSet, int]) -> str
             both eval sets are already full (see `eval_sets_closed`).
 
     Returns:
-        "milestone" every 50 labels (this also covers the very first
-        model, trained once the 50-row seed pool is complete). Every
-        15 labels otherwise: "cycle" while calibration/test are still
-        filling, or "milestone" once both are full - at that point
-        every remaining draw feeds train anyway (`draw_candidate`), so
-        there's no reason left to hold back full hyperparameter/feature
-        optimization for eval-set-growth's sake; every retrain gets the
-        full treatment instead of just every 50th one. `None` if
-        neither landmark was crossed (or the seed pool isn't complete
-        yet).
+        Before calibration and test are both full: "milestone" every 50
+        labels (this also covers the very first model, trained once the
+        50-row seed pool is complete), "cycle" every 15 labels
+        otherwise. Once both eval sets are full: every draw feeds train
+        anyway (`draw_candidate`), so there's no more reason to hold
+        back full hyperparameter/feature optimization *or* retrain less
+        often - the 15/50 schedule is replaced entirely by a tighter
+        `RETRAIN_INTERVAL_EVAL_CLOSED`-label cadence (5), always
+        "milestone", never "cycle". `None` if no landmark was crossed
+        (or the seed pool isn't complete yet).
 
     """
     if n_train_labels < SEED_SIZE:
         return None
+    if eval_sets_closed(counts):
+        return (
+            "milestone" if n_train_labels % RETRAIN_INTERVAL_EVAL_CLOSED == 0 else None
+        )
     if n_train_labels % 50 == 0:
         return "milestone"
     if n_train_labels % 15 == 0:
-        return "milestone" if eval_sets_closed(counts) else "cycle"
+        return "cycle"
     return None
