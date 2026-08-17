@@ -22,9 +22,6 @@ htmlcov/
 # Local bronze/silver layer output
 data/
 
-# Trip Validity active learning model artifacts
-ml/trip_validity_model/artifacts/
-
 # Claude Code local state
 .claude/
 
