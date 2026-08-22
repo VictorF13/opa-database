@@ -1,0 +1,149 @@
+{
+  "sffs": {
+    "raw_selected_features": [
+      "trip_duration_ratio_to_route_avg",
+      "trip_duration_ratio_to_scheduled_v",
+      "route_i_scheduled_duration_n_trips_at_hour"
+    ],
+    "n_features_selected": 3,
+    "n_accepted_steps": 3,
+    "final_cv_brier": 0.00016274825765656825,
+    "fallback_triggered": true
+  },
+  "n_outer_rotations": 50,
+  "n_outer_splits": 5,
+  "n_outer_repeats": 10,
+  "outer_eval_metrics": {
+    "auc": {
+      "mean": 1.0,
+      "std": 0.0
+    },
+    "brier": {
+      "mean": 0.001229902043437382,
+      "std": 0.003009569150755684
+    },
+    "log_loss": {
+      "mean": 0.003854983796286678,
+      "std": 0.008097429984198413
+    },
+    "ece": {
+      "mean": 0.002323250196330344,
+      "std": 0.004075946174426725
+    }
+  },
+  "selected_features": [
+    "gtfs_route_has_both_directions",
+    "weekday_number",
+    "is_weekend",
+    "trip_duration_seconds",
+    "route_avg_trip_duration_seconds_loo",
+    "route_avg_trip_duration_n_trips_loo",
+    "trip_duration_ratio_to_route_avg",
+    "route_direction_avg_trip_duration_seconds_loo",
+    "route_direction_avg_trip_duration_n_trips_loo",
+    "trip_duration_ratio_to_route_direction_avg",
+    "route_hour_avg_trip_duration_seconds_loo",
+    "route_hour_avg_trip_duration_n_trips_loo",
+    "trip_duration_ratio_to_route_hour_avg",
+    "route_direction_hour_avg_trip_duration_seconds_loo",
+    "route_direction_hour_avg_trip_duration_n_trips_loo",
+    "trip_duration_ratio_to_route_direction_hour_avg",
+    "route_reverse_direction_avg_trip_duration_seconds",
+    "route_reverse_direction_n_trips",
+    "trip_duration_ratio_to_reverse_direction_avg",
+    "route_reverse_direction_hour_avg_trip_duration_seconds",
+    "route_reverse_direction_hour_n_trips",
+    "trip_duration_ratio_to_reverse_direction_hour_avg",
+    "route_i_scheduled_duration_avg_seconds",
+    "route_i_scheduled_duration_n_trips",
+    "trip_duration_ratio_to_scheduled_i",
+    "route_v_scheduled_duration_avg_seconds",
+    "route_v_scheduled_duration_n_trips",
+    "trip_duration_ratio_to_scheduled_v",
+    "route_i_scheduled_duration_avg_seconds_at_hour",
+    "route_i_scheduled_duration_n_trips_at_hour",
+    "trip_duration_ratio_to_scheduled_i_at_hour",
+    "route_v_scheduled_duration_avg_seconds_at_hour",
+    "route_v_scheduled_duration_n_trips_at_hour",
+    "trip_duration_ratio_to_scheduled_v_at_hour",
+    "trip_fare_count",
+    "fare_gap_avg_seconds",
+    "fare_gap_stddev_seconds",
+    "fare_gap_coefficient_of_variation",
+    "fare_gap_avg_ratio_to_duration",
+    "fare_span_seconds",
+    "fare_span_ratio_to_duration",
+    "trip_distance_meters",
+    "route_i_length_meters",
+    "trip_distance_ratio_to_route_i",
+    "route_v_length_meters",
+    "trip_distance_ratio_to_route_v",
+    "trip_points_standard_distance_meters",
+    "trip_cohesion_ratio_to_route_i",
+    "trip_cohesion_ratio_to_route_v",
+    "trip_start_distance_to_i_start_meters",
+    "trip_start_offset_ratio_to_i",
+    "trip_start_distance_to_v_start_meters",
+    "trip_start_offset_ratio_to_v",
+    "trip_end_distance_to_i_end_meters",
+    "trip_end_offset_ratio_to_i",
+    "trip_end_distance_to_v_end_meters",
+    "trip_end_offset_ratio_to_v",
+    "path_frechet_distance_to_i_meters",
+    "path_match_score_frechet_i",
+    "path_frechet_distance_to_v_meters",
+    "path_match_score_frechet_v",
+    "path_hausdorff_distance_to_i_meters",
+    "path_match_score_hausdorff_i",
+    "path_hausdorff_distance_to_v_meters",
+    "path_match_score_hausdorff_v",
+    "trip_progress_correlation_to_i",
+    "trip_progress_correlation_to_v",
+    "trip_progress_correlation_n_points",
+    "trip_start_distance_to_nearest_garage_meters",
+    "trip_end_distance_to_nearest_garage_meters",
+    "route_i_straight_line_meters",
+    "route_i_straight_line_ratio",
+    "route_v_straight_line_meters",
+    "route_v_straight_line_ratio",
+    "trip_start_distance_to_nearest_terminal_meters",
+    "trip_start_distance_to_nearest_open_terminal_meters",
+    "trip_start_distance_to_nearest_closed_terminal_meters",
+    "trip_end_distance_to_nearest_terminal_meters",
+    "trip_end_distance_to_nearest_open_terminal_meters",
+    "trip_end_distance_to_nearest_closed_terminal_meters"
+  ],
+  "consensus_hyperparameters": {
+    "num_leaves": 30,
+    "min_child_samples": 22,
+    "learning_rate": 0.13990994418445057,
+    "feature_fraction": 0.733775259790791,
+    "bagging_fraction": 0.7797319207223575,
+    "lambda_l1": 2.711804476299991e-06,
+    "lambda_l2": 2.804643006967186e-06,
+    "n_estimators": 294
+  },
+  "decision_threshold": 0.845402884322555,
+  "unlabeled_pool_confidence": [
+    {
+      "threshold": 0.7,
+      "n_confident": 939590,
+      "pct_confident": 0.9990451765466438
+    },
+    {
+      "threshold": 0.8,
+      "n_confident": 938893,
+      "pct_confident": 0.9983040719286158
+    },
+    {
+      "threshold": 0.9,
+      "n_confident": 937549,
+      "pct_confident": 0.9968750265819447
+    },
+    {
+      "threshold": 0.95,
+      "n_confident": 936525,
+      "pct_confident": 0.9957862301273381
+    }
+  ]
+}

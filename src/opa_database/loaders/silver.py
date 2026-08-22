@@ -24,7 +24,7 @@ def get_connection() -> psycopg.Connection:
         psycopg.Connection: An open connection to the silver database.
 
     """
-    return psycopg.connect(settings.silver_dsn)
+    return psycopg.connect(settings.db_dsn)
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:

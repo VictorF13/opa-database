@@ -25,6 +25,20 @@ uv run prek run --all-files   # dry-run every pre-commit hook before committing
 There's no single-test invocation documented yet since the pytest suite is
 empty; use standard `pytest path::test_name` once tests exist.
 
+**Before considering any code change done** (this includes notebooks),
+run `uv run prek run --all-files` and fix everything it reports — don't
+stop at a clean `ruff check` in isolation; `prek` also runs `ruff
+format`, `ty check`, and the `requirements*.txt`/`uv.lock` sync hooks.
+Two gotchas learned the hard way:
+
+- `prek run --all-files` only checks files **git already tracks**. A
+  freshly created, still-untracked file (e.g. a new notebook) is
+  silently skipped — `git add` it first, or run `ruff
+  check`/`ruff format --check`/`ty check` directly against the new
+  path(s), before trusting a clean `prek` result.
+- The `ruff-check`/`ruff-format` hooks cover `.ipynb` files, not just
+  `.py` — don't assume notebooks are exempt from linting.
+
 Always invoke Python through `uv run` (`uv run <script.py>`, `uv run
 pytest`, ...) rather than calling `python`/`python3` directly, so it runs
 against this project's synced environment and pinned Python version.

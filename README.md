@@ -46,7 +46,7 @@ conventions, known data-quality issues) are in
 
 ```text
 src/opa_database/
-    config.py            Settings (env-driven: raw_data_root, bronze_root, silver_dsn)
+    config.py            Settings (env-driven: raw_data_root, bronze_root, db_dsn)
     cli.py                Click CLI: ingest, ingest-reference, load-silver, load-silver-reference
     contracts/            Pandera schemas for each raw source (bronze validation)
     adapters/             Raw file -> validated bronze Parquet, one module per source
@@ -81,8 +81,9 @@ docker compose up -d   # starts Postgres+PostGIS on :5432 and Adminer on :8080
 | --- | --- |
 | `RAW_DATA_ROOT` | Path to the raw agency data on disk |
 | `BRONZE_ROOT` | Where bronze Parquet files are written |
-| `SILVER_DB_USER` / `SILVER_DB_PASSWORD` / `SILVER_DB_NAME` | Postgres credentials, used both by `docker compose` and by the app |
-| `SILVER_DSN` | Full connection string the pipeline uses to reach Postgres |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Postgres credentials, used both by `docker compose` and by the app |
+| `DB_DSN` | Full connection string the pipeline uses to reach Postgres. Shared by every schema (`silver`, `ml`, ...), not silver-specific |
+| `BIND_HOST` | Optional. Network interface Postgres/Adminer bind to, defaults to `127.0.0.1` (localhost-only). See [`docs/remote-access.md`](docs/remote-access.md) to expose them over Tailscale instead |
 
 ### Running the pipeline
 
