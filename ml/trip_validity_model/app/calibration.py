@@ -78,6 +78,24 @@ class PlattCalibrator:
         return self._model
 
     @classmethod
+    def from_params(cls, coefficient: float, intercept: float) -> PlattCalibrator:
+        """Reconstruct a calibrator from a coefficient/intercept saved via `to_params`.
+
+        Args:
+            coefficient: The fitted logistic regression's coefficient.
+            intercept: The fitted logistic regression's intercept.
+
+        Returns:
+            A `PlattCalibrator` ready to `predict`, without needing to re-`fit`.
+
+        """
+        model = LogisticRegression()
+        model.classes_ = np.array([False, True])
+        model.coef_ = np.array([[coefficient]])
+        model.intercept_ = np.array([intercept])
+        return cls.from_sklearn_model(model)
+
+    @classmethod
     def from_sklearn_model(cls, model: LogisticRegression) -> PlattCalibrator:
         """Reconstruct a calibrator from a model saved via `to_sklearn_model`.
 
