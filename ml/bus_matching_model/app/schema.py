@@ -1,7 +1,8 @@
 """DDL bootstrap for the Bus Matching active-learning app's own tables.
 
-Only ever creates `ml.bus_matching_trip_labels` and
-`ml.bus_matching_model_runs`. Everything else this app reads
+Only ever creates `ml.bus_matching_trip_labels`,
+`ml.bus_matching_model_runs`, `ml.bus_matching_pair_labels` and
+`ml.bus_matching_pair_model_runs`. Everything else this app reads
 (`ml.bus_matching_candidates`, `ml.bus_matching_contestedness`,
 `ml.trip_validity_final`, `ml.trip_validity_fares_final`,
 `ml.trip_validity_route_shapes`, `ml.bus_matching_avl_positions`) is
@@ -67,11 +68,59 @@ ALTER TABLE ml.bus_matching_model_runs
     ADD COLUMN IF NOT EXISTS n_trip_labels_total INTEGER;
 """
 
+# One row per *pair* for the whole month -- the unit the final
+# deliverable is actually about ("is this device this bus's device"),
+# and a different question from the trip-level table above. A device
+# essentially never changes bus mid-month, so a month-level verdict is
+# both answerable and far more informative per click than a per-date
+# one: twenty days of evidence collapse into a single decision.
+#
+# `verdict` is deliberately three-way. "unsure" is a real, useful
+# answer here -- it keeps a genuinely ambiguous pair out of the
+# training set instead of forcing a coin-flip into it, and the
+# selection logic can stop re-showing it.
+_PAIR_LABELS_DDL = """
+CREATE TABLE IF NOT EXISTS ml.bus_matching_pair_labels (
+    bus_id            TEXT NOT NULL,
+    device_id         TEXT NOT NULL,
+    verdict           TEXT NOT NULL CHECK (
+                          verdict IN ('correct', 'wrong', 'unsure')
+                      ),
+    was_top_candidate BOOLEAN NOT NULL,
+    model_confidence  DOUBLE PRECISION,
+    n_candidates      INTEGER NOT NULL,
+    labeled_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (bus_id, device_id)
+);
+"""
+
+# Same shape as the day model's run table, kept separate so the two
+# models' histories (and their trust ramps) never mix.
+_PAIR_MODEL_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS ml.bus_matching_pair_model_runs (
+    run_id               SERIAL PRIMARY KEY,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    n_train_labels       INTEGER NOT NULL,
+    n_labeled_pairs      INTEGER NOT NULL,
+    hyperparameters      JSONB NOT NULL,
+    selected_features    JSONB NOT NULL,
+    test_auc             DOUBLE PRECISION,
+    test_brier           DOUBLE PRECISION,
+    test_log_loss        DOUBLE PRECISION,
+    test_ece             DOUBLE PRECISION,
+    artifact_path        TEXT NOT NULL
+);
+"""
+
 _INDEXES_DDL = """
 CREATE INDEX IF NOT EXISTS bus_matching_trip_labels_bus_date_idx
     ON ml.bus_matching_trip_labels (bus_id, date);
 CREATE INDEX IF NOT EXISTS bus_matching_model_runs_created_at_idx
     ON ml.bus_matching_model_runs (created_at);
+CREATE INDEX IF NOT EXISTS bus_matching_pair_labels_bus_idx
+    ON ml.bus_matching_pair_labels (bus_id);
+CREATE INDEX IF NOT EXISTS bus_matching_pair_model_runs_created_at_idx
+    ON ml.bus_matching_pair_model_runs (created_at);
 """
 
 _DROP_OLD_LABELS_TABLE_DDL = """
@@ -93,4 +142,6 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         conn.execute(_TRIP_LABELS_DDL)
         conn.execute(_MODEL_RUNS_DDL)
         conn.execute(_MODEL_RUNS_MIGRATION_DDL)
+        conn.execute(_PAIR_LABELS_DDL)
+        conn.execute(_PAIR_MODEL_RUNS_DDL)
         conn.execute(_INDEXES_DDL)
