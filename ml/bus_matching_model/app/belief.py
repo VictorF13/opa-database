@@ -146,10 +146,23 @@ TEMPORAL_BOOST_ODDS = 5.0
 # regardless of how confident this prior gets, and Section 12's
 # evaluation sample is what actually checks whether these weights are
 # calibrated right rather than just plausible.
+#
+# Explicitly on request: the dictionary must not be able to resurrect a
+# candidate the GPS evidence has already rejected -- "if it's clearly
+# off in the metrics, it shouldn't win; only if the dictionary one is
+# the highest fit or close to it." Confirmed live this was a real gap,
+# not a hypothetical one: with a flat additive boost (no gate), 118 of
+# ~32,000 solved bus-dates picked a dictionary-backed candidate scoring
+# *worse* than a losing competitor -- one case as stark as 0.91 (GPS-only)
+# losing to 0.15 (dictionary-backed) purely from the boost. The boost
+# below is now zero unless the candidate's own `score` is within
+# `DICTIONARY_RELATIVE_MARGIN` of the best `score` among that bus-date's
+# candidates -- competitive with the evidence, not a way around it.
 DICTIONARY_PRIOR_WEIGHT = 0.6
 DICTIONARY_BOOST_ODDS_SINGLE = 4.0
 DICTIONARY_BOOST_ODDS_BOTH = 12.0
 DICTIONARY_CONFLICT_DAMPING = 0.5
+DICTIONARY_RELATIVE_MARGIN = 0.2
 BOTH_DICTIONARIES = 2
 
 CROSS_SUPPRESSION_STRENGTH = 3.0
@@ -272,8 +285,17 @@ def compute_raw_beliefs(
             if has_conflict is not None
             else 1.0
         )
-        rows["log_odds"] += (
-            DICTIONARY_PRIOR_WEIGHT * conflict_damping * np.log(boost_odds)
+        best_score_here = candidates.groupby(["bus_id", "date"])["score"].transform(
+            "max"
+        )
+        is_competitive = (
+            candidates["score"].fillna(0.0)
+            >= (best_score_here.fillna(0.0) - DICTIONARY_RELATIVE_MARGIN)
+        ).to_numpy()
+        rows["log_odds"] += np.where(
+            is_competitive,
+            DICTIONARY_PRIOR_WEIGHT * conflict_damping * np.log(boost_odds),
+            0.0,
         )
 
     none_rows = (
