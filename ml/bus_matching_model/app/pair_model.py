@@ -18,8 +18,12 @@ plainly because they are *not* learned:
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import joblib
 import numpy as np
 import pandas as pd
 import training
@@ -52,6 +56,21 @@ MIN_EVIDENCE_SCORE = 0.01
 # "too early" instead of quoting a number that would swing wildly with
 # the next click.
 MIN_MEASURED_FOR_PRECISION = 20
+
+# Confidence bands the audit samples across. Uniform random sampling of
+# "confident" buses is not enough: confirmed live that 84.6% of buses
+# above 0.90 sit at >=0.999, so a uniform sample lands almost entirely
+# on near-certain ones and reports 100% precision while never probing
+# the band where errors would actually live. Sampling evenly across
+# these bands puts eyes on the risky ones in proportion to their risk,
+# not their frequency.
+AUDIT_BANDS = ((0.90, 0.99), (0.99, 0.999), (0.999, 1.01))
+
+# Folds for the cross-validated metrics. Grouped by bus, so a bus's
+# positive and its implied negatives never straddle a fold.
+CV_FOLDS = 5
+
+ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts" / "pair_models"
 
 
 def fetch_pair_labels(conn: psycopg.Connection) -> pd.DataFrame:
@@ -217,12 +236,85 @@ def train_pair_model(rows: pd.DataFrame) -> dict[str, Any] | None:
         preds = training.predict_positive_proba(model, test_df[names])
         metrics = evaluate_metrics(test_df["label"].to_numpy(), preds)
 
+    cv = cross_validated_metrics(rows, names)
+
+    # The shipped model is refit on *everything*, since a model trained
+    # on 70% of an already-small label set is strictly worse at the job
+    # it actually has to do. `metrics`/`cv` describe held-out
+    # performance; `model` is the one that scores production.
+    final_model = training.train_model(rows[names], rows["label"].to_numpy())
+
     return {
-        "model": model,
+        "model": final_model,
         "selected_features": names,
         "metrics": metrics,
+        "cv": cv,
         "n_train": len(train_df),
         "n_test": len(test_df),
+        "n_rows": len(rows),
+    }
+
+
+def cross_validated_metrics(rows: pd.DataFrame, names: list[str]) -> dict[str, Any]:
+    """Compute grouped k-fold metrics -- steadier than one 70/30 split.
+
+    With only a few dozen labeled buses, a single held-out split lands
+    on a handful of buses and its AUC swings wildly with which ones.
+    K-fold uses every bus as test exactly once and reports the spread,
+    so "AUC 1.000" can be distinguished from "AUC 1.000 +/- 0.000"
+    (genuinely separable) versus "0.87 +/- 0.19" (noise).
+
+    Grouped by bus for the same reason as the single split: a bus's
+    positive and its implied negatives share nearly all their features.
+
+    Args:
+        rows: `build_training_rows` output.
+        names: Feature columns to fit on.
+
+    Returns:
+        `{"auc_mean", "auc_std", "brier_mean", "ece_mean", "n_folds"}`,
+        all `NaN` when there aren't enough buses of both classes to
+        make folds.
+
+    """
+    buses = rows["bus_id"].unique()
+    empty = {
+        "auc_mean": float("nan"),
+        "auc_std": float("nan"),
+        "brier_mean": float("nan"),
+        "ece_mean": float("nan"),
+        "n_folds": 0,
+    }
+    if len(buses) < CV_FOLDS:
+        return empty
+
+    rng = np.random.default_rng(RANDOM_SEED)
+    folds = np.array_split(rng.permutation(buses), CV_FOLDS)
+
+    aucs, briers, eces = [], [], []
+    for fold in folds:
+        is_test = rows["bus_id"].isin(set(fold))
+        train_df, test_df = rows[~is_test], rows[is_test]
+        if (
+            train_df["label"].nunique() < BOTH_CLASSES
+            or test_df["label"].nunique() < BOTH_CLASSES
+        ):
+            continue
+        fold_model = training.train_model(train_df[names], train_df["label"].to_numpy())
+        preds = training.predict_positive_proba(fold_model, test_df[names])
+        m = evaluate_metrics(test_df["label"].to_numpy(), preds)
+        aucs.append(m["auc"])
+        briers.append(m["brier"])
+        eces.append(m["ece"])
+
+    if not aucs:
+        return empty
+    return {
+        "auc_mean": float(np.mean(aucs)),
+        "auc_std": float(np.std(aucs)),
+        "brier_mean": float(np.mean(briers)),
+        "ece_mean": float(np.mean(eces)),
+        "n_folds": len(aucs),
     }
 
 
@@ -347,38 +439,56 @@ def select_audit_buses(
     limit: int = 50,
     seed: int = RANDOM_SEED,
 ) -> pd.DataFrame:
-    """Randomly sample buses the model is already confident about.
+    """Sample confident buses for audit, stratified across confidence bands.
 
     Plan Section 7's "random confident pairs -- small but
     non-negotiable": the ambiguity-ranked queue only ever shows hard
     cases, so labeling it can never reveal a *silent* error, a bus the
-    model is confidently wrong about. Only a random sample of
-    already-confident predictions can, and it is the sole source of an
-    unbiased precision estimate.
+    model is confidently wrong about.
 
-    Random, not lowest-confidence-above-threshold: sampling the weakest
-    of the confident ones would be biased in the other direction and
-    would overstate the error rate.
+    **Stratified, not uniform.** Confirmed live that 84.6% of buses
+    above 0.90 sit at >=0.999, so uniform sampling spends nearly every
+    label on near-certain buses and yields a 100% precision figure that
+    never touched the 0.90-0.99 band where errors would live. Sampling
+    evenly across `AUDIT_BANDS` fixes that; within each band the draw is
+    still uniform, so each band's precision stays an unbiased estimate
+    *for that band*.
 
     Args:
         ranked: `rank_pairs` output.
         labels: `fetch_pair_labels` output.
-        threshold: Confidence cut defining "already confident".
-        limit: How many buses to sample.
+        threshold: Confidence cut defining "already confident". Bands
+            below it are skipped.
+        limit: Total buses to sample across all bands.
         seed: Sampling seed, so the audit set is reproducible.
 
     Returns:
-        Same columns as `select_hard_buses`, in random order.
+        Same columns as `select_hard_buses`, plus `audit_band`, shuffled
+        so bands are interleaved rather than labeled in blocks.
 
     """
     tops = ranked[(ranked["pair_rank"] == 1) & (ranked["pair_score"] >= threshold)]
     if not labels.empty:
         tops = tops[~tops["bus_id"].isin(set(labels["bus_id"]))]
-    if tops.empty:
-        return tops.head(0)
     cols = ["bus_id", "device_id", "pair_score", "pair_margin", "n_candidates_for_bus"]
-    n = min(limit, len(tops))
-    return tops.sample(n=n, random_state=seed)[cols].reset_index(drop=True)
+    if tops.empty:
+        return tops.reindex(columns=[*cols, "audit_band"]).head(0)
+
+    bands = [(lo, hi) for lo, hi in AUDIT_BANDS if hi > threshold]
+    per_band = max(limit // max(len(bands), 1), 1)
+    picked = []
+    for lo, hi in bands:
+        in_band = tops[(tops["pair_score"] >= lo) & (tops["pair_score"] < hi)]
+        if in_band.empty:
+            continue
+        n = min(per_band, len(in_band))
+        chunk = in_band.sample(n=n, random_state=seed)[cols].copy()
+        chunk["audit_band"] = f"{lo:g}-{hi:g}"
+        picked.append(chunk)
+    if not picked:
+        return tops.reindex(columns=[*cols, "audit_band"]).head(0)
+    out = pd.concat(picked, ignore_index=True)
+    return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
 def audit_precision(labels: pd.DataFrame) -> dict[str, Any]:
@@ -405,10 +515,34 @@ def audit_precision(labels: pd.DataFrame) -> dict[str, Any]:
     ]
     n = len(audit)
     n_correct = int((audit["verdict"] == "correct").sum()) if n else 0
+
+    # Per-band, because an overall figure is dominated by whichever band
+    # happens to have the most labels -- and the bands differ in exactly
+    # the way that matters. `model_confidence` is the score at labeling
+    # time, which is the score the verdict actually judged.
+    by_band = []
+    for lo, hi in AUDIT_BANDS:
+        rows = audit[
+            (audit["model_confidence"] >= lo) & (audit["model_confidence"] < hi)
+        ]
+        if rows.empty:
+            continue
+        band_n = len(rows)
+        band_correct = int((rows["verdict"] == "correct").sum())
+        by_band.append(
+            {
+                "band": f"{lo:g}-{hi:g}",
+                "n": band_n,
+                "n_correct": band_correct,
+                "precision": band_correct / band_n,
+            }
+        )
+
     return {
         "n": n,
         "n_correct": n_correct,
         "precision": (n_correct / n) if n else float("nan"),
+        "by_band": by_band,
     }
 
 
@@ -581,3 +715,89 @@ def progress_summary(
         "remaining": total_buses - len(done),
         "labeled_any": int(labels["bus_id"].nunique()) if not labels.empty else 0,
     }
+
+
+def save_pair_run(
+    conn: psycopg.Connection, state: dict[str, Any], n_labeled_pairs: int
+) -> int:
+    """Persist a fitted pair model to disk and its metadata to Postgres.
+
+    Without this the pair model lived only in Streamlit session state,
+    so it vanished on restart and nothing downstream (the final output
+    table, any later audit) could reproduce the scores that produced a
+    given result.
+
+    Args:
+        conn: An open connection.
+        state: `train_pair_model` output.
+        n_labeled_pairs: Distinct labeled pairs behind this fit.
+
+    Returns:
+        The new `ml.bus_matching_pair_model_runs` row's `run_id`.
+
+    """
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = ARTIFACTS_DIR / f"pair_run_{n_labeled_pairs:05d}_{int(time.time())}.joblib"
+    joblib.dump(
+        {"model": state["model"], "selected_features": state["selected_features"]},
+        path,
+    )
+
+    metrics = state["metrics"]
+    cv = state.get("cv", {})
+    row = conn.execute(
+        """
+        INSERT INTO ml.bus_matching_pair_model_runs
+            (n_train_labels, n_labeled_pairs, hyperparameters, selected_features,
+             test_auc, test_brier, test_log_loss, test_ece, artifact_path)
+        VALUES (%(n_train)s, %(n_pairs)s, %(hyper)s, %(feats)s,
+                %(auc)s, %(brier)s, %(logloss)s, %(ece)s, %(path)s)
+        RETURNING run_id;
+        """,
+        {
+            "n_train": int(state.get("n_rows", state["n_train"])),
+            "n_pairs": n_labeled_pairs,
+            # CV metrics ride along in hyperparameters rather than new
+            # columns: they describe this fit, and the run table is
+            # shared shape with the day model's.
+            "hyper": json.dumps({**training.FIXED_HYPERPARAMETERS, "cv": cv}),
+            "feats": json.dumps(state["selected_features"]),
+            "auc": _none_if_nan(metrics.get("auc")),
+            "brier": _none_if_nan(metrics.get("brier")),
+            "logloss": _none_if_nan(metrics.get("log_loss")),
+            "ece": _none_if_nan(metrics.get("ece")),
+            "path": str(path),
+        },
+    ).fetchone()
+    return int(row[0])
+
+
+def _none_if_nan(value: float | None) -> float | None:
+    """NaN -> None, so Postgres stores a real NULL rather than 'NaN'."""
+    if value is None:
+        return None
+    return None if np.isnan(value) else float(value)
+
+
+def load_latest_pair_run(conn: psycopg.Connection) -> dict[str, Any] | None:
+    """Reload the most recent persisted pair model, if any.
+
+    Args:
+        conn: An open connection.
+
+    Returns:
+        `{"model", "selected_features", "run_id"}`, or `None` when no
+        run has been saved or its artifact is missing from disk.
+
+    """
+    row = conn.execute(
+        "SELECT run_id, artifact_path FROM ml.bus_matching_pair_model_runs "
+        "ORDER BY run_id DESC LIMIT 1;"
+    ).fetchone()
+    if row is None:
+        return None
+    path = Path(row[1])
+    if not path.exists():
+        return None
+    loaded = joblib.load(path)
+    return {**loaded, "run_id": int(row[0])}

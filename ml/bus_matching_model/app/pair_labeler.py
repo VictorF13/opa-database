@@ -120,9 +120,18 @@ def build_pairs(_conn: psycopg.Connection, n_labels: int) -> pd.DataFrame:  # no
     return pair_features.build_pair_features(_conn, day, pd.Series(day_scores))
 
 
-def _fit_pair_model(pairs: pd.DataFrame, labels: pd.DataFrame) -> dict[str, Any] | None:
+def _fit_pair_model(
+    conn: psycopg.Connection, pairs: pd.DataFrame, labels: pd.DataFrame
+) -> dict[str, Any] | None:
+    """Fit the pair model and persist it, so a restart doesn't lose it."""
     rows = pair_model.build_training_rows(pairs, labels)
-    return pair_model.train_pair_model(rows)
+    state = pair_model.train_pair_model(rows)
+    if state is not None:
+        state["run_id"] = pair_model.save_pair_run(
+            conn, state, n_labeled_pairs=int(labels["bus_id"].nunique())
+        )
+        conn.commit()
+    return state
 
 
 def _sample_trips_for_bus(conn: psycopg.Connection, bus_id: str) -> pd.DataFrame:
@@ -201,6 +210,16 @@ def _render_progress(
             f"({audit['n_correct']}/{audit['n']} randomly-sampled confident picks "
             "correct). This is the number to trust."
         )
+        bands = audit.get("by_band") or []
+        if bands:
+            st.caption(
+                "By confidence band — an overall figure hides which band the "
+                "labels came from, and the bands are what differ: "
+                + " · ".join(
+                    f"**{b['band']}**: {b['precision']:.0%} ({b['n_correct']}/{b['n']})"
+                    for b in bands
+                )
+            )
     else:
         st.caption(
             "**No audit labels yet, so there is no unbiased precision figure.** "
@@ -300,8 +319,18 @@ def _render_sidebar(ranked: pd.DataFrame, state: dict[str, Any] | None) -> float
                 f"{len(state['selected_features'])} features"
             )
             st.caption(
-                f"test AUC {m['auc']:.3f} · Brier {m['brier']:.3f} · ECE {m['ece']:.3f}"
+                f"holdout AUC {m['auc']:.3f} · Brier {m['brier']:.3f} · "
+                f"ECE {m['ece']:.3f}"
             )
+            cv = state.get("cv", {})
+            if cv.get("n_folds"):
+                st.caption(
+                    f"{cv['n_folds']}-fold CV AUC "
+                    f"{cv['auc_mean']:.3f} ± {cv['auc_std']:.3f} · "
+                    f"ECE {cv['ece_mean']:.3f} — the steadier read"
+                )
+            if state.get("run_id"):
+                st.caption(f"saved as pair run #{state['run_id']}")
         st.divider()
         no_ev = pair_model.no_evidence_buses(ranked)
         st.caption(
@@ -363,7 +392,9 @@ def _render_trip_grid(
         st.divider()
 
 
-def _ensure_pair_state(pairs: pd.DataFrame, labels: pd.DataFrame) -> dict | None:
+def _ensure_pair_state(
+    conn: psycopg.Connection, pairs: pd.DataFrame, labels: pd.DataFrame
+) -> dict | None:
     """Fit the pair model on first load and every `RETRAIN_EVERY` labels."""
     needs_fit = (
         "pair_state" not in st.session_state
@@ -371,7 +402,7 @@ def _ensure_pair_state(pairs: pd.DataFrame, labels: pd.DataFrame) -> dict | None
     )
     if needs_fit:
         with st.spinner("Fitting pair model..."):
-            st.session_state.pair_state = _fit_pair_model(pairs, labels)
+            st.session_state.pair_state = _fit_pair_model(conn, pairs, labels)
         st.session_state.labels_since_fit = 0
     return st.session_state.pair_state
 
@@ -394,7 +425,7 @@ def main() -> None:
         return
 
     labels = pair_model.fetch_pair_labels(conn)
-    state = _ensure_pair_state(pairs, labels)
+    state = _ensure_pair_state(conn, pairs, labels)
     ranked = pair_model.rank_pairs(pairs, state)
     threshold = _render_sidebar(ranked, state)
 
