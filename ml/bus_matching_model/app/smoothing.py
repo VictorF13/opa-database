@@ -106,6 +106,29 @@ def _gap_conflicts(
     return False
 
 
+def _device_gap_conflicts(
+    device_id: str,
+    start: datetime.date,
+    end: datetime.date,
+    bus_id: str,
+    device_owner: Mapping[tuple[str, datetime.date], str],
+) -> bool:
+    """Check for `device_id` confirmed to another bus on any day in `[start, end]`.
+
+    Inclusive on both ends (unlike `_gap_conflicts`'s exclusive range) --
+    harmless redundancy, since `start`/`end` are already-verified
+    running days by the time a caller reaches this check, and it avoids
+    an off-by-one trap on single-day gaps.
+    """
+    day = start
+    while day <= end:
+        owner = device_owner.get((device_id, day))
+        if owner is not None and owner != bus_id:
+            return True
+        day += ONE_DAY
+    return False
+
+
 def _raw_runs(
     dates: list[datetime.date], buses: list[str]
 ) -> list[tuple[str, list[datetime.date]]]:
@@ -271,3 +294,179 @@ def smooth_all_devices(assignments: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         correction_rows, columns=["device_id", "date", "from_bus", "to_bus"]
     )
     return intervals, corrections_df
+
+
+def build_device_owner(
+    assignments: pd.DataFrame, corrections: pd.DataFrame
+) -> dict[tuple[str, datetime.date], str]:
+    """Build `extend_to_bus_bounds`'s `device_owner` from smoothed, not raw, data.
+
+    Confirmed live this distinction matters: building it straight from
+    `assignments` (Section 9's raw per-day output) and using that to
+    gate `extend_to_bus_bounds` split intervals on phantom conflicts --
+    days `smooth_all_devices` had *already* corrected away as isolated
+    one-day noise (recorded in `corrections`) still showed their old,
+    overridden bus in the raw table, so extension treated Section 10's
+    own resolved noise as if it were a live, unresolved conflict.
+    Applying `corrections` on top before use fixes it.
+
+    Args:
+        assignments: Same frame passed to `smooth_all_devices`.
+        corrections: That call's second return value.
+
+    Returns:
+        `(device_id, date) -> bus_id`, corrections applied.
+
+    """
+    device_owner = {
+        (device_id, date): bus_id
+        for bus_id, date, device_id in zip(
+            assignments["bus_id"],
+            assignments["date"],
+            assignments["device_id"],
+            strict=True,
+        )
+    }
+    for device_id, date, to_bus in zip(
+        corrections["device_id"],
+        corrections["date"],
+        corrections["to_bus"],
+        strict=True,
+    ):
+        device_owner[device_id, date] = to_bus
+    return device_owner
+
+
+def _extend_one_bus(
+    bus_id: str,
+    device_id: str,
+    group: pd.DataFrame,
+    running_dates: list[datetime.date],
+    device_owner: Mapping[tuple[str, datetime.date], str],
+) -> list[dict]:
+    """`extend_to_bus_bounds` for a single already-single-device bus."""
+    # Calendar days already inside one of this bus's own Section 10
+    # interval spans -- includes that section's *own* bridged days, not
+    # just its directly-solved ones (those stay distinguishable via each
+    # original row's own n_days/n_corrected, preserved below; this set
+    # is only for "already accounted for" vs "new").
+    already_covered: set[datetime.date] = set()
+    for row in group.itertuples(index=False):
+        day = row.from_date
+        while day <= row.to_date:
+            already_covered.add(day)
+            day += ONE_DAY
+
+    # Walk the bus's own *running* days in order (never a calendar day it
+    # didn't operate -- that's not a gap to bridge, just a day off).
+    # Skip a day this bus's device is directly confirmed elsewhere on;
+    # for every other day, merge it into the current run only if the
+    # *entire calendar range* back to the run's last day (not just
+    # running days) is conflict-free -- checking only individual running
+    # days would silently bridge straight through a conflict that falls
+    # entirely on days this bus simply has no trips on. Confirmed live
+    # this matters: a device legitimately confirmed to a different bus
+    # for a few days this bus never runs on got bridged through when
+    # this check only looked at running days one at a time instead of
+    # the full range between them.
+    runs: list[list[datetime.date]] = []
+    for day in running_dates:
+        is_available = day in already_covered or device_owner.get((device_id, day)) in (
+            None,
+            bus_id,
+        )
+        if not is_available:
+            continue
+        if runs and not _device_gap_conflicts(
+            device_id, runs[-1][-1], day, bus_id, device_owner
+        ):
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+
+    rows = []
+    for run_dates in runs:
+        from_date, to_date = min(run_dates), max(run_dates)
+        subsumed = group[
+            (group["from_date"] >= from_date) & (group["to_date"] <= to_date)
+        ]
+        n_already_covered = sum(1 for d in run_dates if d in already_covered)
+        rows.append(
+            {
+                "device_id": device_id,
+                "bus_id": bus_id,
+                "from_date": from_date,
+                "to_date": to_date,
+                "n_days": int(subsumed["n_days"].sum()),
+                "n_corrected": int(subsumed["n_corrected"].sum()),
+                "n_extended": len(run_dates) - n_already_covered,
+            }
+        )
+    return rows
+
+
+def extend_to_bus_bounds(
+    intervals: pd.DataFrame,
+    bus_running_dates: Mapping[str, list[datetime.date]],
+    device_owner: Mapping[tuple[str, datetime.date], str],
+) -> pd.DataFrame:
+    """Extend single-device buses' intervals to their full running range.
+
+    On request, from a domain expert: a device essentially never changes
+    bus mid-month ("hardly ever, perhaps once every blue moon"), so once
+    a bus has exactly one distinct confirmed device across *all* its
+    Section 10 intervals, that device very likely covers every day the
+    bus ran that month -- not just the days Section 9 happened to find
+    enough direct evidence for. Extends before the earliest interval,
+    after the latest, and through any gap between same-device intervals.
+
+    Still gated by the same cross-device conflict check as gap-bridging
+    (never extend into a day where the target device is already
+    confirmed to a *different* bus) -- "hardly ever" is not "never", and
+    a bus's own running-date range can include a day genuinely covered
+    by the rare real swap.
+
+    Buses with more than one distinct device across their intervals are
+    left completely untouched -- that's exactly the rare swap case this
+    rule doesn't try to resolve, on request (ambiguous which device to
+    extrapolate into the gaps for those).
+
+    Args:
+        intervals: `smooth_all_devices` output.
+        bus_running_dates: `bus_id -> every date that bus had a valid
+            trip` (not just days it has an interval for).
+        device_owner: `(device_id, date) -> bus_id` for every day
+            Section 9 directly confirmed that device to some bus --
+            built from the same source as `smooth_all_devices`'s
+            internal `bus_owner`, just keyed the other way around.
+
+    Returns:
+        A new intervals-shaped `DataFrame` (same columns as
+        `smooth_all_devices`, plus `n_extended`: days added beyond what
+        was directly solved). Untouched (multi-device) buses' original
+        rows pass through with `n_extended=0`.
+
+    """
+    rows = []
+    for bus_id, group in intervals.groupby("bus_id"):
+        device_ids = group["device_id"].unique()
+        running_dates = sorted(bus_running_dates.get(bus_id, []))
+        if len(device_ids) != 1 or not running_dates:
+            rows.extend({**r, "n_extended": 0} for r in group.to_dict("records"))
+            continue
+        rows.extend(
+            _extend_one_bus(bus_id, device_ids[0], group, running_dates, device_owner)
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "device_id",
+            "bus_id",
+            "from_date",
+            "to_date",
+            "n_days",
+            "n_corrected",
+            "n_extended",
+        ],
+    )

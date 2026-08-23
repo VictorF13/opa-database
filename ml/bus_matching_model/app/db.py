@@ -130,16 +130,49 @@ def fetch_all_candidates_with_scores(
 
     Returns:
         Columns `bus_id`, `date`, `device_id`, `from_dictionary`,
-        `frac_good_trips` (`NaN` if not yet featurized).
+        `n_dictionary_sources` (0/1/2 -- how many of the two dictionary
+        tables independently name this exact `(bus_id, device_id)`
+        pair; corroboration by both is stronger evidence than either
+        alone), `bus_has_dictionary_conflict` (bool -- this bus has
+        *multiple* distinct dictionary-sourced devices across all its
+        candidates, so any single dictionary pair for it is weaker
+        evidence, on request), `frac_good_trips` (`NaN` if not yet
+        featurized).
 
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT bus_id, date, device_id, from_dictionary "
-            "FROM ml.bus_matching_candidates;"
+            """
+            WITH pair_sources AS (
+                SELECT bus_id, device_id, count(DISTINCT origin) AS n_sources
+                FROM ml.bus_matching_candidate_pairs
+                GROUP BY bus_id, device_id
+            ),
+            bus_distinct_devices AS (
+                SELECT bus_id, count(DISTINCT device_id) AS n_distinct_devices
+                FROM ml.bus_matching_candidate_pairs
+                GROUP BY bus_id
+            )
+            SELECT
+                c.bus_id, c.date, c.device_id, c.from_dictionary,
+                coalesce(ps.n_sources, 0) AS n_dictionary_sources,
+                coalesce(bd.n_distinct_devices, 0) > 1 AS bus_has_dictionary_conflict
+            FROM ml.bus_matching_candidates c
+            LEFT JOIN pair_sources ps
+              ON ps.bus_id = c.bus_id AND ps.device_id = c.device_id
+            LEFT JOIN bus_distinct_devices bd ON bd.bus_id = c.bus_id;
+            """
         )
         cand = pd.DataFrame.from_records(
-            cur.fetchall(), columns=["bus_id", "date", "device_id", "from_dictionary"]
+            cur.fetchall(),
+            columns=[
+                "bus_id",
+                "date",
+                "device_id",
+                "from_dictionary",
+                "n_dictionary_sources",
+                "bus_has_dictionary_conflict",
+            ],
         )
     if features.empty:
         cand["frac_good_trips"] = float("nan")
@@ -187,6 +220,8 @@ def compute_candidate_scores(
         "date",
         "device_id",
         "from_dictionary",
+        "n_dictionary_sources",
+        "bus_has_dictionary_conflict",
         "score",
         "is_model_score",
     ]

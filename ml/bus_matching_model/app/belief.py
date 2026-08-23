@@ -131,6 +131,27 @@ def model_prior_weight_for(
 TEMPORAL_PRIOR_WEIGHT = 0.5
 TEMPORAL_BOOST_ODDS = 5.0
 
+# On request, from a domain expert (not a guess): a dictionary-sourced
+# pair is meaningfully more trustworthy than a blocking-only candidate,
+# since the dictionary is "more or less guaranteed to have been on that
+# bus at some point" -- but not certain (some dictionary pairs turned
+# out wrong on inspection), and weaker specifically when a bus has
+# *multiple* disagreeing dictionary-sourced devices (evidence of the
+# rare real device-swap case, not a clean signal either way). Two
+# independent dictionary tables agreeing on the exact same pair
+# (`n_dictionary_sources == 2`) is stronger than either alone. Full
+# (undamped) weight, unlike the static Tier 1 heuristic's `PRIOR_WEIGHT`
+# -- this is real corroborating evidence, not an unvalidated score --
+# but `MIN_VOTES_TO_RESOLVE` still gates *training* label resolution
+# regardless of how confident this prior gets, and Section 12's
+# evaluation sample is what actually checks whether these weights are
+# calibrated right rather than just plausible.
+DICTIONARY_PRIOR_WEIGHT = 0.6
+DICTIONARY_BOOST_ODDS_SINGLE = 4.0
+DICTIONARY_BOOST_ODDS_BOTH = 12.0
+DICTIONARY_CONFLICT_DAMPING = 0.5
+BOTH_DICTIONARIES = 2
+
 CROSS_SUPPRESSION_STRENGTH = 3.0
 CROSS_SUPPRESSION_THRESHOLD = 0.6
 
@@ -235,6 +256,24 @@ def compute_raw_beliefs(
             has_temporal_support.to_numpy(),
             TEMPORAL_PRIOR_WEIGHT * np.log(TEMPORAL_BOOST_ODDS),
             0.0,
+        )
+
+    n_dictionary_sources = candidates.get("n_dictionary_sources")
+    if n_dictionary_sources is not None:
+        n_sources = n_dictionary_sources.to_numpy()
+        boost_odds = np.where(
+            n_sources >= BOTH_DICTIONARIES,
+            DICTIONARY_BOOST_ODDS_BOTH,
+            np.where(n_sources == 1, DICTIONARY_BOOST_ODDS_SINGLE, 1.0),
+        )
+        has_conflict = candidates.get("bus_has_dictionary_conflict")
+        conflict_damping = (
+            np.where(has_conflict.to_numpy(), DICTIONARY_CONFLICT_DAMPING, 1.0)
+            if has_conflict is not None
+            else 1.0
+        )
+        rows["log_odds"] += (
+            DICTIONARY_PRIOR_WEIGHT * conflict_damping * np.log(boost_odds)
         )
 
     none_rows = (
