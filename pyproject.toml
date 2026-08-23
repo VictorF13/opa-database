@@ -55,8 +55,8 @@ lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
 "*.ipynb" = ["T201"]
 
 [tool.ty]
-src.include = ["src", "tests", "ml/trip_validity_model/app"]
-environment.extra-paths = ["ml/trip_validity_model/app"]
+src.include = ["src", "tests", "ml/trip_validity_model/app", "ml/bus_matching_model/app"]
+environment.extra-paths = ["ml/trip_validity_model/app", "ml/bus_matching_model/app"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
