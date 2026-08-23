@@ -47,6 +47,12 @@ RANDOM_SEED = 42
 # cases.
 MIN_EVIDENCE_SCORE = 0.01
 
+# Precision measured on a handful of labels is not a measurement. Below
+# this many labeled pairs above the threshold, `stopping_signal` reports
+# "too early" instead of quoting a number that would swing wildly with
+# the next click.
+MIN_MEASURED_FOR_PRECISION = 20
+
 
 def fetch_pair_labels(conn: psycopg.Connection) -> pd.DataFrame:
     """Fetch every recorded pair verdict.
@@ -360,6 +366,99 @@ def precision_at_threshold(
         "n_correct": n_correct,
         "precision": (n_correct / n) if n else float("nan"),
         "coverage_buses": int((tops["pair_score"] >= threshold).sum()),
+    }
+
+
+def stopping_signal(
+    ranked: pd.DataFrame,
+    labels: pd.DataFrame,
+    threshold: float,
+    target_precision: float = 0.95,
+) -> dict[str, Any]:
+    """Report whether labeling is done, and if not, what is still missing.
+
+    Deliberately descriptive rather than prescriptive: it reports the
+    two numbers that actually decide the question -- how many buses are
+    still unsettled, and what precision has been *measured* at the
+    current threshold -- and only calls "done" for the unambiguous case.
+    There is no invented convergence heuristic here; `target_precision`
+    is a choice the caller makes with the measured number in front of
+    them, not a fact about the data.
+
+    Args:
+        ranked: `rank_pairs` output.
+        labels: `fetch_pair_labels` output.
+        threshold: Current ship threshold.
+        target_precision: The precision the caller wants before
+            trusting the unlabeled remainder.
+
+    Returns:
+        `verdict` (`"too_early"`, `"keep_going"`, `"precision_low"`,
+        `"queue_empty"`, `"done"`), a human-readable `message`, plus the
+        underlying `remaining`, `precision`, and `n_measured` so the
+        caller can show the evidence rather than just the conclusion.
+
+    """
+    prog = progress_summary(ranked, labels, threshold)
+    prec = precision_at_threshold(ranked, labels, threshold)
+    queue = select_hard_buses(ranked, labels, limit=1)
+
+    remaining = prog["remaining"]
+    measured = prec["precision"]
+    n_measured = prec["n"]
+    base = {
+        "remaining": remaining,
+        "precision": measured,
+        "n_measured": n_measured,
+    }
+
+    if n_measured < MIN_MEASURED_FOR_PRECISION:
+        return {
+            **base,
+            "verdict": "too_early",
+            "message": (
+                f"Only {n_measured} labeled pairs clear {threshold:.2f} so far -- "
+                "not enough to measure precision yet. Keep labeling."
+            ),
+        }
+    if measured < target_precision:
+        return {
+            **base,
+            "verdict": "precision_low",
+            "message": (
+                f"Measured precision {measured:.1%} is below the "
+                f"{target_precision:.0%} you asked for. Either keep labeling, "
+                "or raise the threshold "
+                "(fewer buses auto-accepted, each one safer)."
+            ),
+        }
+    if queue.empty:
+        return {
+            **base,
+            "verdict": "queue_empty",
+            "message": (
+                f"Nothing ambiguous left to label, and precision is {measured:.1%}. "
+                f"{remaining} buses remain below the threshold -- they need "
+                "candidate generation or new data, not more labeling."
+            ),
+        }
+    if remaining == 0:
+        return {
+            **base,
+            "verdict": "done",
+            "message": (
+                f"Every bus is settled and measured precision is {measured:.1%}. "
+                "Safe to stop."
+            ),
+        }
+    return {
+        **base,
+        "verdict": "keep_going",
+        "message": (
+            f"Precision {measured:.1%} at {threshold:.2f}, {remaining} buses still "
+            "unsettled. Each label also implies negatives for that bus's rivals, "
+            "so this number falls faster than one-per-click."
+        ),
     }
 
 

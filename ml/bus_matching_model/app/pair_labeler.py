@@ -165,6 +165,15 @@ def _shapes_for_trip(conn: psycopg.Connection, trip: pd.Series) -> dict[str, tup
     return shapes
 
 
+_STOPPING_RENDER = {
+    "too_early": st.info,
+    "keep_going": st.info,
+    "precision_low": st.warning,
+    "queue_empty": st.warning,
+    "done": st.success,
+}
+
+
 def _render_progress(
     ranked: pd.DataFrame, labels: pd.DataFrame, threshold: float
 ) -> None:
@@ -193,6 +202,10 @@ def _render_progress(
             f"No labeled pair clears {threshold:.2f} yet, so precision is not "
             "measurable. Label a few and it appears here."
         )
+
+    signal = pair_model.stopping_signal(ranked, labels, threshold)
+    render = _STOPPING_RENDER.get(signal["verdict"], st.info)
+    render(f"**When to stop:** {signal['message']}")
 
 
 def _record(
