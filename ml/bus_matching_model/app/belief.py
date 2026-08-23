@@ -166,12 +166,21 @@ def _prior_odds(score: pd.Series) -> pd.Series:
     return odds.fillna(1.0)
 
 
-def compute_date_beliefs(
+def compute_raw_beliefs(
     candidates: pd.DataFrame,
     votes: pd.DataFrame,
     model_prior_weight: float = MODEL_PRIOR_WEIGHT_CEILING,
 ) -> pd.DataFrame:
-    """Compute posterior belief over every bus-date's candidates, for one date's data.
+    """Compute per-bus-date belief from prior + temporal + vote evidence only.
+
+    This is `compute_date_beliefs` *without* cross-bus-date suppression --
+    the raw, independent-per-bus-date posterior. Plan Section 9's global
+    assignment is the real joint solve that supersedes the suppression
+    heuristic, so it consumes *this* function's output (specifically
+    `log_odds`, as `cost = -log_odds`), not the suppressed one --
+    layering a global solve on top of an already-suppressed posterior
+    would double-count the same "one device, one bus" constraint two
+    different ways.
 
     Args:
         candidates: Columns `bus_id`, `date`, `device_id`, `score` (a 0-1
@@ -198,15 +207,14 @@ def compute_date_beliefs(
 
     Returns:
         One row per `(bus_id, date, option)` (`option` is a `device_id`
-        or the `NONE_OPTION` sentinel), columns `posterior` (sums to 1
-        within each bus-date), `n_votes` (total votes for that
-        bus-date, repeated per row), `rank` (1 = top option within its
-        bus-date).
+        or the `NONE_OPTION` sentinel), columns `log_odds`, `posterior`
+        (sums to 1 within each bus-date, *not* suppressed), `n_votes`
+        (total votes for that bus-date, repeated per row).
 
     """
     if candidates.empty:
         return pd.DataFrame(
-            columns=["bus_id", "date", "option", "posterior", "n_votes", "rank"]
+            columns=["bus_id", "date", "option", "log_odds", "posterior", "n_votes"]
         )
 
     is_model_score = candidates.get("is_model_score")
@@ -270,6 +278,35 @@ def compute_date_beliefs(
     all_rows["posterior"] = _softmax_within_groups(
         all_rows, ["bus_id", "date"], "log_odds"
     )
+    return all_rows[["bus_id", "date", "option", "log_odds", "posterior", "n_votes"]]
+
+
+def compute_date_beliefs(
+    candidates: pd.DataFrame,
+    votes: pd.DataFrame,
+    model_prior_weight: float = MODEL_PRIOR_WEIGHT_CEILING,
+) -> pd.DataFrame:
+    """Compute posterior belief over every bus-date's candidates, for one date's data.
+
+    Args:
+        candidates: See `compute_raw_beliefs`.
+        votes: See `compute_raw_beliefs`.
+        model_prior_weight: See `compute_raw_beliefs`.
+
+    Returns:
+        One row per `(bus_id, date, option)` (`option` is a `device_id`
+        or the `NONE_OPTION` sentinel), columns `posterior` (sums to 1
+        within each bus-date), `n_votes` (total votes for that
+        bus-date, repeated per row), `rank` (1 = top option within its
+        bus-date).
+
+    """
+    if candidates.empty:
+        return pd.DataFrame(
+            columns=["bus_id", "date", "option", "posterior", "n_votes", "rank"]
+        )
+
+    all_rows = compute_raw_beliefs(candidates, votes, model_prior_weight)
 
     # Cross-bus-date suppression: for each device, its posterior on a
     # given bus-date gets discounted by how confidently it's already
