@@ -13,6 +13,16 @@ repos:
         language: python
         types: [python]
         pass_filenames: true
+        # ml/bus_matching_model/app and ml/trip_validity_model/app both
+        # have same-named sibling modules (features.py, db.py, ...). A
+        # single shared pyproject.toml `environment.extra-paths` list
+        # makes bare `from features import X` ambiguous between the two
+        # -- confirmed live, ty silently resolves it to whichever tree is
+        # listed first, breaking the other tree's own sibling imports.
+        # Excluded here rather than added to that shared list; matches
+        # the standing call to leave this app's lint/format debt for
+        # later too.
+        exclude: ^ml/bus_matching_model/app/
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.11.22
     hooks:
