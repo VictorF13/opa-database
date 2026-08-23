@@ -94,6 +94,25 @@ CREATE TABLE IF NOT EXISTS ml.bus_matching_pair_labels (
 );
 """
 
+# `label_source` separates the two sampling regimes, which measure
+# genuinely different things and must never be pooled into one precision
+# figure:
+#
+# - 'queue'  -- the ambiguity-ranked labeling queue. Deliberately biased
+#               toward hard cases, so precision over these understates
+#               the system.
+# - 'audit'  -- a *random* sample of pairs the model is already confident
+#               about (plan Section 7's "random confident pairs, small
+#               but non-negotiable"). This is the only unbiased estimate
+#               of whether confident predictions are actually right, and
+#               the only one that should ever be quoted as "precision".
+#
+# Added after the table existed; existing rows are queue-sourced.
+_PAIR_LABELS_MIGRATION_DDL = """
+ALTER TABLE ml.bus_matching_pair_labels
+    ADD COLUMN IF NOT EXISTS label_source TEXT NOT NULL DEFAULT 'queue';
+"""
+
 # Same shape as the day model's run table, kept separate so the two
 # models' histories (and their trust ramps) never mix.
 _PAIR_MODEL_RUNS_DDL = """
@@ -143,5 +162,6 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         conn.execute(_MODEL_RUNS_DDL)
         conn.execute(_MODEL_RUNS_MIGRATION_DDL)
         conn.execute(_PAIR_LABELS_DDL)
+        conn.execute(_PAIR_LABELS_MIGRATION_DDL)
         conn.execute(_PAIR_MODEL_RUNS_DDL)
         conn.execute(_INDEXES_DDL)

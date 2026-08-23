@@ -165,6 +165,11 @@ def _shapes_for_trip(conn: psycopg.Connection, trip: pd.Series) -> dict[str, tup
     return shapes
 
 
+def _on_mode_change() -> None:
+    """Drop the current bus so the new mode picks its own next one."""
+    st.session_state.current_bus = None
+
+
 _STOPPING_RENDER = {
     "too_early": st.info,
     "keep_going": st.info,
@@ -189,18 +194,28 @@ def _render_progress(
         text=f"{prog['done']} / {prog['total_buses']} buses settled",
     )
 
-    prec = pair_model.precision_at_threshold(ranked, labels, threshold)
-    if prec["n"]:
+    audit = pair_model.audit_precision(labels)
+    if audit["n"]:
         st.caption(
-            f"Measured precision at {threshold:.2f}: "
-            f"**{prec['precision']:.1%}** ({prec['n_correct']}/{prec['n']} labeled "
-            f"top picks correct). This is what makes the threshold a measured "
-            f"choice rather than a guess -- move it and watch this number."
+            f"**Unbiased precision (audit sample): {audit['precision']:.1%}** "
+            f"({audit['n_correct']}/{audit['n']} randomly-sampled confident picks "
+            "correct). This is the number to trust."
         )
     else:
         st.caption(
-            f"No labeled pair clears {threshold:.2f} yet, so precision is not "
-            "measurable. Label a few and it appears here."
+            "**No audit labels yet, so there is no unbiased precision figure.** "
+            "Queue labels alone cannot reveal a confidently-wrong prediction, "
+            "because the queue only ever shows ambiguous buses. Switch to "
+            "'Audit confident picks' in the sidebar to start measuring."
+        )
+
+    prec = pair_model.precision_at_threshold(ranked, labels, threshold)
+    if prec["n"]:
+        st.caption(
+            f"Precision over *all* labels at {threshold:.2f}: "
+            f"{prec['precision']:.1%} ({prec['n_correct']}/{prec['n']}) -- "
+            "includes queue labels, which are drawn from the hardest cases, so "
+            "read it as a floor rather than an estimate."
         )
 
     signal = pair_model.stopping_signal(ranked, labels, threshold)
@@ -226,6 +241,7 @@ def _record(
         was_top_candidate=is_top,
         model_confidence=confidence,
         n_candidates=n_candidates,
+        label_source=st.session_state.get("label_mode", "queue"),
     )
     conn.commit()
     st.session_state.labels_since_fit += 1
@@ -236,6 +252,27 @@ def _record(
 def _render_sidebar(ranked: pd.DataFrame, state: dict[str, Any] | None) -> float:
     """Draw the sidebar and return the chosen ship threshold."""
     with st.sidebar:
+        st.subheader("What to label")
+        st.radio(
+            "Sampling mode",
+            options=["queue", "audit"],
+            format_func=lambda m: (
+                "Hard cases — teach the model"
+                if m == "queue"
+                else "Audit confident picks — measure it"
+            ),
+            key="label_mode",
+            on_change=_on_mode_change,
+            help=(
+                "Hard cases are the most ambiguous buses: best for teaching, "
+                "but their precision understates the system because they are "
+                "deliberately the difficult ones. Audit randomly samples buses "
+                "the model is ALREADY confident about -- the only way to catch "
+                "a confidently-wrong prediction, and the only unbiased "
+                "precision estimate."
+            ),
+        )
+        st.divider()
         st.subheader("Ship threshold")
         threshold = st.slider(
             "Confidence to count a bus as settled",
@@ -365,9 +402,15 @@ def main() -> None:
     _render_progress(ranked, labels, threshold)
     st.divider()
 
-    queue = pair_model.select_hard_buses(ranked, labels, limit=50)
+    mode = st.session_state.get("label_mode", "queue")
+    if mode == "audit":
+        queue = pair_model.select_audit_buses(ranked, labels, threshold, limit=50)
+        empty_msg = f"No unlabeled buses above {threshold:.2f} left to audit."
+    else:
+        queue = pair_model.select_hard_buses(ranked, labels, limit=50)
+        empty_msg = "Nothing ambiguous left in the queue."
     if queue.empty:
-        st.success("Nothing ambiguous left in the queue.")
+        st.success(empty_msg)
         return
 
     if st.session_state.current_bus is None:

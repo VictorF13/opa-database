@@ -62,12 +62,13 @@ def fetch_pair_labels(conn: psycopg.Connection) -> pd.DataFrame:
 
     Returns:
         Columns `bus_id`, `device_id`, `verdict`, `was_top_candidate`,
-        `model_confidence`, `n_candidates`.
+        `model_confidence`, `n_candidates`, `label_source`.
 
     """
     return pd.read_sql(
         "SELECT bus_id, device_id, verdict, was_top_candidate, "
-        "model_confidence, n_candidates FROM ml.bus_matching_pair_labels;",
+        "model_confidence, n_candidates, label_source "
+        "FROM ml.bus_matching_pair_labels;",
         conn,
     )
 
@@ -81,6 +82,7 @@ def insert_pair_label(
     was_top_candidate: bool,
     model_confidence: float | None,
     n_candidates: int,
+    label_source: str = "queue",
 ) -> None:
     """Record (or overwrite) one pair verdict.
 
@@ -95,20 +97,24 @@ def insert_pair_label(
         model_confidence: The model's P(correct) at labeling time, or
             `None` before any model exists.
         n_candidates: How many candidates were on screen.
+        label_source: `"queue"` (ambiguity-ranked, biased toward hard
+            cases) or `"audit"` (random confident sample, the only
+            unbiased precision source). Never pool the two.
 
     """
     conn.execute(
         """
         INSERT INTO ml.bus_matching_pair_labels
             (bus_id, device_id, verdict, was_top_candidate,
-             model_confidence, n_candidates)
+             model_confidence, n_candidates, label_source)
         VALUES (%(bus_id)s, %(device_id)s, %(verdict)s, %(was_top)s,
-                %(conf)s, %(n_candidates)s)
+                %(conf)s, %(n_candidates)s, %(source)s)
         ON CONFLICT (bus_id, device_id) DO UPDATE SET
             verdict = EXCLUDED.verdict,
             was_top_candidate = EXCLUDED.was_top_candidate,
             model_confidence = EXCLUDED.model_confidence,
             n_candidates = EXCLUDED.n_candidates,
+            label_source = EXCLUDED.label_source,
             labeled_at = now();
         """,
         {
@@ -118,6 +124,7 @@ def insert_pair_label(
             "was_top": was_top_candidate,
             "conf": model_confidence,
             "n_candidates": n_candidates,
+            "source": label_source,
         },
     )
 
@@ -333,6 +340,78 @@ def no_evidence_buses(ranked: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("pair_score", ascending=False)[cols].reset_index(drop=True)
 
 
+def select_audit_buses(
+    ranked: pd.DataFrame,
+    labels: pd.DataFrame,
+    threshold: float,
+    limit: int = 50,
+    seed: int = RANDOM_SEED,
+) -> pd.DataFrame:
+    """Randomly sample buses the model is already confident about.
+
+    Plan Section 7's "random confident pairs -- small but
+    non-negotiable": the ambiguity-ranked queue only ever shows hard
+    cases, so labeling it can never reveal a *silent* error, a bus the
+    model is confidently wrong about. Only a random sample of
+    already-confident predictions can, and it is the sole source of an
+    unbiased precision estimate.
+
+    Random, not lowest-confidence-above-threshold: sampling the weakest
+    of the confident ones would be biased in the other direction and
+    would overstate the error rate.
+
+    Args:
+        ranked: `rank_pairs` output.
+        labels: `fetch_pair_labels` output.
+        threshold: Confidence cut defining "already confident".
+        limit: How many buses to sample.
+        seed: Sampling seed, so the audit set is reproducible.
+
+    Returns:
+        Same columns as `select_hard_buses`, in random order.
+
+    """
+    tops = ranked[(ranked["pair_rank"] == 1) & (ranked["pair_score"] >= threshold)]
+    if not labels.empty:
+        tops = tops[~tops["bus_id"].isin(set(labels["bus_id"]))]
+    if tops.empty:
+        return tops.head(0)
+    cols = ["bus_id", "device_id", "pair_score", "pair_margin", "n_candidates_for_bus"]
+    n = min(limit, len(tops))
+    return tops.sample(n=n, random_state=seed)[cols].reset_index(drop=True)
+
+
+def audit_precision(labels: pd.DataFrame) -> dict[str, Any]:
+    """Unbiased precision, measured on audit-sampled labels only.
+
+    Queue-sourced labels are deliberately drawn from the hardest cases,
+    so pooling them with audit labels produces a number that means
+    neither one thing nor the other. This function uses audit rows
+    alone.
+
+    Args:
+        labels: `fetch_pair_labels` output (needs `label_source`).
+
+    Returns:
+        `{"n", "n_correct", "precision"}` over audit rows with a
+        decisive verdict. `precision` is `NaN` until any exist.
+
+    """
+    if labels.empty or "label_source" not in labels.columns:
+        return {"n": 0, "n_correct": 0, "precision": float("nan")}
+    audit = labels[
+        (labels["label_source"] == "audit")
+        & (labels["verdict"].isin(["correct", "wrong"]))
+    ]
+    n = len(audit)
+    n_correct = int((audit["verdict"] == "correct").sum()) if n else 0
+    return {
+        "n": n,
+        "n_correct": n_correct,
+        "precision": (n_correct / n) if n else float("nan"),
+    }
+
+
 def precision_at_threshold(
     ranked: pd.DataFrame, labels: pd.DataFrame, threshold: float
 ) -> dict[str, Any]:
@@ -400,7 +479,12 @@ def stopping_signal(
 
     """
     prog = progress_summary(ranked, labels, threshold)
-    prec = precision_at_threshold(ranked, labels, threshold)
+    # Audit labels only: queue labels are drawn from the hardest cases
+    # *and* (in practice) tend to be confirmations of the top pick, so a
+    # precision computed over them says nothing about whether confident
+    # predictions are silently wrong -- which is the actual question
+    # "can I stop?" depends on.
+    prec = audit_precision(labels)
     queue = select_hard_buses(ranked, labels, limit=1)
 
     remaining = prog["remaining"]
@@ -417,8 +501,10 @@ def stopping_signal(
             **base,
             "verdict": "too_early",
             "message": (
-                f"Only {n_measured} labeled pairs clear {threshold:.2f} so far -- "
-                "not enough to measure precision yet. Keep labeling."
+                f"Only {n_measured} audit-sampled labels so far -- not enough to "
+                "measure precision. Switch to 'Audit confident picks' and label "
+                f"~{MIN_MEASURED_FOR_PRECISION} of them: queue labels alone can "
+                "never reveal a confidently-wrong prediction."
             ),
         }
     if measured < target_precision:
