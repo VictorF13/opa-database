@@ -22,6 +22,9 @@ htmlcov/
 # Local bronze/silver layer output
 data/
 
+# Regenerable per-date Tier 1 feature checkpoints (ml/bus_matching_model)
+ml/bus_matching_model/artifacts/features/
+
 # Claude Code local state
 .claude/
 
