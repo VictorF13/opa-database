@@ -45,6 +45,9 @@ class RouteShape:
         seg_len: `(n-1,)` segment lengths in meters.
         seg_cum_start: `(n-1,)` cumulative length along the route at each
             segment's start, i.e. the chainage of `seg_start[i]`.
+        seg_bearing_deg: `(n-1,)` each segment's compass bearing in
+            degrees (0 = North, 90 = East), directly comparable to the
+            AVL feed's own `heading_degrees` column.
         total_length: Total route length in meters.
         start_point: `(2,)` the shape's first vertex.
         end_point: `(2,)` the shape's last vertex.
@@ -71,6 +74,7 @@ class RouteShape:
     seg_vec: np.ndarray
     seg_len: np.ndarray
     seg_cum_start: np.ndarray
+    seg_bearing_deg: np.ndarray
     total_length: float
     start_point: np.ndarray
     end_point: np.ndarray
@@ -216,6 +220,11 @@ def build_shape_cache(conn: psycopg.Connection) -> dict[ShapeKey, RouteShape]:
         seg_vec = seg_end - seg_start
         seg_len = np.linalg.norm(seg_vec, axis=1)
         seg_cum_start = np.concatenate([[0.0], np.cumsum(seg_len)[:-1]])
+        # Compass bearing (0 = North, 90 = East) to match the AVL feed's
+        # own heading convention: atan2 takes easting first, northing
+        # second (the transpose of the usual math convention), so the
+        # result is already clockwise-from-north.
+        seg_bearing_deg = np.degrees(np.arctan2(seg_vec[:, 0], seg_vec[:, 1])) % 360.0
         total_length = float(seg_len.sum())
 
         stops = stops_by_key.get(
@@ -248,6 +257,7 @@ def build_shape_cache(conn: psycopg.Connection) -> dict[ShapeKey, RouteShape]:
             seg_vec=seg_vec,
             seg_len=seg_len,
             seg_cum_start=seg_cum_start,
+            seg_bearing_deg=seg_bearing_deg,
             total_length=total_length,
             start_point=points[0],
             end_point=points[-1],
@@ -265,21 +275,20 @@ def build_shape_cache(conn: psycopg.Connection) -> dict[ShapeKey, RouteShape]:
     return cache
 
 
-def project_points(shape: RouteShape, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Project points onto a shape via vectorized nearest-segment search.
-
-    For each input point, finds the closest point on any of the shape's
-    segments and returns that point's chainage (distance along the
-    route) and offset (perpendicular distance from the shape).
+def project_points_full(
+    shape: RouteShape, xy: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project points onto a shape, also returning the matched segment index.
 
     Args:
         shape: The route shape to project onto.
         xy: `(k, 2)` points to project, same metric CRS as `shape`.
 
     Returns:
-        `(chainage, offset)`, each `(k,)`. `chainage` is meters along the
-        route from `shape.start_point`; `offset` is the perpendicular
-        distance in meters from the nearest point on the shape.
+        `(chainage, offset, best_seg)`, each `(k,)`. `best_seg` indexes
+        `shape.seg_*` arrays -- needed by the heading-consistency
+        feature, which compares each point's own compass heading to
+        `shape.seg_bearing_deg` at the segment it actually matched.
 
     """
     # (k, n-1, 2): each point against every segment's start->vector.
@@ -302,6 +311,27 @@ def project_points(shape: RouteShape, xy: np.ndarray) -> tuple[np.ndarray, np.nd
     chainage = (
         shape.seg_cum_start[best_seg] + t[rows, best_seg] * shape.seg_len[best_seg]
     )
+    return chainage, offset, best_seg
+
+
+def project_points(shape: RouteShape, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Project points onto a shape via vectorized nearest-segment search.
+
+    For each input point, finds the closest point on any of the shape's
+    segments and returns that point's chainage (distance along the
+    route) and offset (perpendicular distance from the shape).
+
+    Args:
+        shape: The route shape to project onto.
+        xy: `(k, 2)` points to project, same metric CRS as `shape`.
+
+    Returns:
+        `(chainage, offset)`, each `(k,)`. `chainage` is meters along the
+        route from `shape.start_point`; `offset` is the perpendicular
+        distance in meters from the nearest point on the shape.
+
+    """
+    chainage, offset, _ = project_points_full(shape, xy)
     return chainage, offset
 
 

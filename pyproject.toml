@@ -53,6 +53,10 @@ lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "SLF001", "ANN201", "D103"]
 "*.ipynb" = ["T201"]
+# Progress-reporting CLI scripts: stdout is the interface, and they are
+# run directly (uv run path/to/script.py) rather than imported, so they
+# are deliberately not packages.
+"ml/*/scripts/*.py" = ["T201", "INP001"]
 
 [tool.ty]
 src.include = ["src", "tests", "ml/trip_validity_model/app"]

@@ -7,11 +7,18 @@ kinematic features from one date's AVL positions projected onto the
 Everything here is pure numpy/pandas against one bulk per-date pull;
 there is no per-pair database query.
 
-Tier 2 (fare timing, day-level continuity, Frechet/Hausdorff) is
-deliberately not implemented yet -- Tier 1 alone is enough to look at
-score separation and start labeling; Tier 2 is only worth the extra
-cost for the top few candidates per bus-date once Tier 1 narrows the
-field.
+Tier 2's cheap, high-value half is implemented here for *all*
+candidates rather than a top-N subset: fare timing (the plan's named
+discriminator for two buses on the same route minutes apart) and
+day-level continuity (what makes a day unambiguous when individual
+trips aren't). Both are per-pair-day rather than per-trip-per-segment,
+so they add little to the run.
+
+Frechet/Hausdorff shape distance is deliberately **not** implemented:
+it's a per-trip dynamic program, and across the month's ~3.3M
+trip-candidate pairs it is the one Tier 2 item that would genuinely
+push a full rebuild into many hours. `direction_correlation` already
+captures the order-sensitivity Frechet was specified for.
 """
 
 from __future__ import annotations
@@ -21,10 +28,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from gtfs_cache import min_distance_to_each, project_points
+from gtfs_cache import min_distance_to_each, project_points_full
 
 if TYPE_CHECKING:
     import datetime
+    from collections.abc import Mapping
 
     from gtfs_cache import RouteShape
 
@@ -42,6 +50,15 @@ MIN_POINTS_FOR_MONOTONICITY = 2
 MIN_POINTS_FOR_DISTANCE = 2
 VISITED_BIN_OFFSET_M = 100.0
 N_GTFS_DIRECTIONS = 2
+
+HEADING_TOLERANCE_DEG = 45.0
+
+# Arbitrary, on request: AFC's `route_direction` is binary (0/1) and
+# GTFS's is "I"/"V", with no documented correspondence between them.
+# Rather than guess (or force) a mapping, pick one and let the model
+# learn whichever sign is real -- a backwards mapping just yields a
+# negative coefficient, which is equally informative.
+GTFS_DIRECTION_AS_BINARY = {"I": 0, "V": 1}
 BAD_TRIP_CONTRADICTION_MIN = 0.5
 
 DAY_FEATURE_NAMES = [
@@ -51,6 +68,17 @@ DAY_FEATURE_NAMES = [
     "n_trips_no_gtfs",
     "frac_good_trips",
     "n_clearly_bad_trips",
+    # Tier 2 / new signals -- see compute_trip_direction_features and
+    # _day_continuity_features. Everything from index 6 on is treated as
+    # NaN-able by the no-data early return, so new names belong here.
+    "median_heading_consistency",
+    "median_direction_agreement",
+    "median_fare_stationary_fraction",
+    "median_fare_near_stop_m",
+    "frac_device_points_in_windows",
+    "frac_device_moving_points_in_windows",
+    "first_activity_gap_seconds",
+    "last_activity_gap_seconds",
     "median_buffer_coverage_50",
     "median_shape_coverage",
     "median_direction_margin",
@@ -80,6 +108,9 @@ class TripPositions:
         xy: `(n, 2)` metric coordinates (SRID 31984).
         speed_kmh: `(n,)` reported speed.
         route_id: `(n,)` AVL-reported route id, as text.
+        heading_deg: `(n,)` AVL-reported compass heading in degrees
+            (0 = North, 90 = East), directly comparable to
+            `RouteShape.seg_bearing_deg`.
 
     """
 
@@ -87,6 +118,7 @@ class TripPositions:
     xy: np.ndarray
     speed_kmh: np.ndarray
     route_id: np.ndarray
+    heading_deg: np.ndarray
 
     def window(self, start_epoch: float, end_epoch: float) -> TripPositions:
         """Slice to the points inside `[start_epoch, end_epoch]`."""
@@ -97,6 +129,7 @@ class TripPositions:
             xy=self.xy[lo:hi],
             speed_kmh=self.speed_kmh[lo:hi],
             route_id=self.route_id[lo:hi],
+            heading_deg=self.heading_deg[lo:hi],
         )
 
 
@@ -138,6 +171,8 @@ def compute_trip_direction_features(
     points: TripPositions,
     shape: RouteShape,
     trip_route_id: str,
+    afc_direction: int | None = None,
+    fare_epochs: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Compute one trip's features against one direction's shape.
 
@@ -146,6 +181,14 @@ def compute_trip_direction_features(
         shape: The candidate direction's `RouteShape` from the cache.
         trip_route_id: The trip's own AFC `route_id`, for the
             route-id-agreement feature.
+        afc_direction: The trip's own AFC `route_direction` (0/1), an
+            *independent* statement of which way the trip ran. Powers
+            `direction_agreement` -- see that feature's note below.
+        fare_epochs: Epoch seconds of this trip's fare taps, for the
+            fare-timing features (plan Section 3.3's discriminator for
+            two buses on the same route minutes apart). `None`/empty
+            leaves those features `NaN` rather than 0, so "no fares" is
+            never scored as "fares in the wrong place".
 
     Returns:
         A flat dict of per-trip-direction metrics. Callers pick the
@@ -153,7 +196,7 @@ def compute_trip_direction_features(
 
     """
     n = points.xy.shape[0]
-    chainage, offset = project_points(shape, points.xy)
+    chainage, offset, best_seg = project_points_full(shape, points.xy)
 
     corr = 0.0
     has_spread = np.ptp(points.epoch) > 0 and np.ptp(chainage) > 0
@@ -208,10 +251,57 @@ def compute_trip_direction_features(
     )
     end_stop_dist = _nearest_dist(points.xy[-1], shape.last_stop_points) if n else None
 
+    # Heading consistency: does the device's own reported compass heading
+    # agree with the bearing of the shape segment it matched? An
+    # independent cross-check on direction that doesn't rely on the
+    # chainage-vs-time correlation, and one that stays meaningful on
+    # trips too short or too sparse for a stable correlation.
+    if n:
+        heading_delta = np.abs(points.heading_deg - shape.seg_bearing_deg[best_seg])
+        heading_delta = np.minimum(heading_delta, 360.0 - heading_delta)
+        heading_consistency = float(np.mean(heading_delta <= HEADING_TOLERANCE_DEG))
+    else:
+        heading_consistency = np.nan
+
+    # Direction agreement: AFC's own binary `route_direction` against this
+    # shape's GTFS direction, under an ARBITRARY fixed mapping
+    # (`GTFS_DIRECTION_AS_BINARY`). On request, deliberately not a
+    # researched/forced correspondence -- if the mapping is backwards,
+    # the model simply learns a negative coefficient and the feature is
+    # just as useful. That only works because this feeds a *trained*
+    # model rather than a hand-set weight.
+    if afc_direction is None:
+        direction_agreement = np.nan
+    else:
+        shape_binary = GTFS_DIRECTION_AS_BINARY.get(shape.direction)
+        direction_agreement = (
+            np.nan if shape_binary is None else float(afc_direction == shape_binary)
+        )
+
+    # Fare timing (plan Section 3.3): fares are collected while stopped,
+    # so in a true pairing the bus's fare taps land where this device was
+    # stationary and near a stop on this route. This is the plan's named
+    # discriminator for the hardest case -- two buses on the same route
+    # minutes apart, where every adherence feature looks identical.
+    fare_stationary_fraction = np.nan
+    fare_near_stop_m = np.nan
+    if fare_epochs is not None and fare_epochs.size and n:
+        idx = np.clip(np.searchsorted(points.epoch, fare_epochs), 0, n - 1)
+        fare_stationary_fraction = float(
+            np.mean(points.speed_kmh[idx] <= STATIONARY_SPEED_KMH)
+        )
+        if shape.stop_points.shape[0]:
+            fare_stop_dists = min_distance_to_each(points.xy[idx], shape.stop_points)
+            fare_near_stop_m = float(np.median(fare_stop_dists))
+
     return {
         "n_points": n,
         "direction_correlation": corr,
         "monotonicity_fraction": monotonic_frac,
+        "heading_consistency": heading_consistency,
+        "direction_agreement": direction_agreement,
+        "fare_stationary_fraction": fare_stationary_fraction,
+        "fare_near_stop_m": fare_near_stop_m,
         **buffer_coverage,
         "shape_coverage": shape_coverage,
         "median_offset_m": float(np.median(offset)) if n else np.nan,
@@ -269,10 +359,78 @@ def _matched_shapes(
     return candidates
 
 
+_DAY_CONTINUITY_NAMES = (
+    "frac_device_points_in_windows",
+    "frac_device_moving_points_in_windows",
+    "first_activity_gap_seconds",
+    "last_activity_gap_seconds",
+)
+
+
+def _day_continuity_features(
+    all_trips: pd.DataFrame, device_positions: TripPositions | None
+) -> dict[str, float]:
+    """Day-level "does this device's whole day look like this bus's day" features.
+
+    Plan Section 3.3's day-level continuity block. These are the
+    features that make a *day* unambiguous even when individual trips
+    aren't: a device that genuinely runs this bus should spend its
+    moving time inside this bus's trip windows, and start and stop
+    around when the bus does. Computed once per pair-day (not per trip),
+    so they cost almost nothing on top of the per-trip loop.
+
+    Args:
+        all_trips: Every one of this bus's trips for the date -- *not*
+            just the sampled ones, since "what fraction of the device's
+            day does this bus explain" is only meaningful against the
+            bus's full schedule.
+        device_positions: The device's full day of AVL points, or `None`.
+
+    Returns:
+        A dict with every name in `_DAY_CONTINUITY_NAMES`, all `NaN`
+        when there's no AVL to measure against (never 0 -- missing data
+        is not negative evidence).
+
+    """
+    if device_positions is None or device_positions.epoch.size == 0 or all_trips.empty:
+        return dict.fromkeys(_DAY_CONTINUITY_NAMES, np.nan)
+
+    epoch = device_positions.epoch
+    starts = all_trips["trip_start_timestamp"].to_numpy(dtype=np.float64)
+    ends = all_trips["trip_end_timestamp"].to_numpy(dtype=np.float64)
+    order = np.argsort(starts)
+    starts, ends = starts[order], ends[order]
+
+    # A point is "in a window" if the nearest window starting at or
+    # before it hasn't ended yet -- one vectorized searchsorted rather
+    # than an interval loop.
+    idx = np.clip(np.searchsorted(starts, epoch, side="right") - 1, 0, len(starts) - 1)
+    in_window = (epoch >= starts[idx]) & (epoch <= ends[idx])
+
+    moving = device_positions.speed_kmh > STATIONARY_SPEED_KMH
+    frac_moving_in_windows = (
+        float(np.mean(in_window[moving])) if moving.any() else np.nan
+    )
+    moving_epochs = epoch[moving]
+
+    return {
+        "frac_device_points_in_windows": float(np.mean(in_window)),
+        "frac_device_moving_points_in_windows": frac_moving_in_windows,
+        "first_activity_gap_seconds": (
+            abs(float(moving_epochs[0] - starts[0])) if moving_epochs.size else np.nan
+        ),
+        "last_activity_gap_seconds": (
+            abs(float(moving_epochs[-1] - ends[-1])) if moving_epochs.size else np.nan
+        ),
+    }
+
+
 def compute_pair_day_features(
     sampled_trips: pd.DataFrame,
     device_positions: TripPositions | None,
     shape_cache: dict[tuple, RouteShape],
+    fares_by_trip: Mapping[int, np.ndarray] | None = None,
+    all_trips: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     """Aggregate one candidate `(bus_id, device_id, date)` pair to one row.
 
@@ -280,12 +438,21 @@ def compute_pair_day_features(
         sampled_trips: This bus's sampled trips for the date (from
             `select_sample_trips`), columns include
             `trip_start_timestamp`/`trip_end_timestamp` (epoch seconds),
-            `route_id`, `gtfs_feed_version_date`, `gtfs_shape_id_i`,
+            `route_id`, `route_direction`, `trip_id`,
+            `gtfs_feed_version_date`, `gtfs_shape_id_i`,
             `gtfs_shape_id_v`.
+        all_trips: This bus's *full* set of trips for the date, for the
+            day-continuity features only -- "what fraction of the
+            device's day does this bus explain" is meaningless against
+            a sample (8 of ~17 trips would undercount by half).
+            Defaults to `sampled_trips` when not supplied.
         device_positions: The candidate device's full day of AVL points,
             or `None` if the device has zero pings that day (dead-AVL
             day -- every trip is skipped, never scored negative).
         shape_cache: The `gtfs_cache.build_shape_cache` result.
+        fares_by_trip: `trip_id -> epoch seconds of that trip's fare
+            taps`, for the fare-timing features. `None` leaves them
+            `NaN`.
 
     Returns:
         A flat dict with every name in `DAY_FEATURE_NAMES`.
@@ -315,8 +482,14 @@ def compute_pair_day_features(
             n_no_avl += 1
             continue
 
+        afc_direction = getattr(trip, "route_direction", None)
+        fare_epochs = (
+            fares_by_trip.get(trip.trip_id) if fares_by_trip is not None else None
+        )
         direction_results = [
-            compute_trip_direction_features(window, shape, trip.route_id)
+            compute_trip_direction_features(
+                window, shape, trip.route_id, afc_direction, fare_epochs
+            )
             for shape in candidates
         ]
         best = max(direction_results, key=lambda r: r["direction_correlation"])
@@ -359,6 +532,9 @@ def compute_pair_day_features(
         direction_margin >= GOOD_TRIP_DIRECTION_MARGIN_MIN
     )
     bad = contradiction_fraction >= BAD_TRIP_CONTRADICTION_MIN
+    day_level = _day_continuity_features(
+        sampled_trips if all_trips is None else all_trips, device_positions
+    )
 
     return {
         "n_trips_sampled": n_sampled,
@@ -367,6 +543,13 @@ def compute_pair_day_features(
         "n_trips_no_gtfs": n_no_gtfs,
         "frac_good_trips": float(good.mean()),
         "n_clearly_bad_trips": int(bad.sum()),
+        "median_heading_consistency": float(np.nanmedian(col("heading_consistency"))),
+        "median_direction_agreement": float(np.nanmedian(col("direction_agreement"))),
+        "median_fare_stationary_fraction": float(
+            np.nanmedian(col("fare_stationary_fraction"))
+        ),
+        "median_fare_near_stop_m": float(np.nanmedian(col("fare_near_stop_m"))),
+        **day_level,
         "median_buffer_coverage_50": float(np.median(buffer_coverage_50)),
         "median_shape_coverage": float(np.median(col("shape_coverage"))),
         "median_direction_margin": float(np.median(direction_margin)),
