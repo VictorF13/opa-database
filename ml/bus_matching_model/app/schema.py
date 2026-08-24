@@ -2,7 +2,8 @@
 
 Only ever creates `ml.bus_matching_trip_labels`,
 `ml.bus_matching_model_runs`, `ml.bus_matching_pair_labels`,
-`ml.bus_matching_pair_model_runs`, and `ml.bus_matching_final_pairs`.
+`ml.bus_matching_pair_model_runs`, `ml.bus_matching_final_pairs`, and
+`ml.bus_matching_unclaimed_devices`.
 Everything else this app reads
 (`ml.bus_matching_candidates`, `ml.bus_matching_contestedness`,
 `ml.trip_validity_final`, `ml.trip_validity_fares_final`,
@@ -154,6 +155,29 @@ CREATE TABLE IF NOT EXISTS ml.bus_matching_final_pairs (
 );
 """
 
+# The device-side mirror of `bus_matching_final_pairs`: every active
+# device (>=1 real AVL ping in the period) that no bus claims, with an
+# explicit `reason` -- 'never_blocked' (blocking found no bus for it at
+# all), 'blocked_only_to_excluded_bus' (its only candidacy was a
+# 67-prefix bus), or 'lost_competition' (it competed for a real bus and
+# another device won). Rebuilt wholesale alongside `bus_matching_final_pairs`,
+# not incrementally maintained.
+_UNCLAIMED_DEVICES_DDL = """
+CREATE TABLE IF NOT EXISTS ml.bus_matching_unclaimed_devices (
+    device_id             TEXT PRIMARY KEY,
+    n_pings               INTEGER NOT NULL,
+    n_days_active         INTEGER NOT NULL,
+    first_active_date     DATE NOT NULL,
+    last_active_date      DATE NOT NULL,
+    in_dictionary         BOOLEAN NOT NULL,
+    dictionary_bus_ids    TEXT,
+    best_candidate_bus_id TEXT,
+    best_candidate_score  DOUBLE PRECISION,
+    reason                TEXT NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
 _INDEXES_DDL = """
 CREATE INDEX IF NOT EXISTS bus_matching_trip_labels_bus_date_idx
     ON ml.bus_matching_trip_labels (bus_id, date);
@@ -167,6 +191,8 @@ CREATE INDEX IF NOT EXISTS bus_matching_final_pairs_method_idx
     ON ml.bus_matching_final_pairs (method);
 CREATE INDEX IF NOT EXISTS bus_matching_final_pairs_device_idx
     ON ml.bus_matching_final_pairs (device_id);
+CREATE INDEX IF NOT EXISTS bus_matching_unclaimed_devices_reason_idx
+    ON ml.bus_matching_unclaimed_devices (reason);
 """
 
 _DROP_OLD_LABELS_TABLE_DDL = """
@@ -192,4 +218,5 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         conn.execute(_PAIR_LABELS_MIGRATION_DDL)
         conn.execute(_PAIR_MODEL_RUNS_DDL)
         conn.execute(_FINAL_PAIRS_DDL)
+        conn.execute(_UNCLAIMED_DEVICES_DDL)
         conn.execute(_INDEXES_DDL)
