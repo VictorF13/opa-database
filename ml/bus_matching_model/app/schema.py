@@ -1,8 +1,9 @@
 """DDL bootstrap for the Bus Matching active-learning app's own tables.
 
 Only ever creates `ml.bus_matching_trip_labels`,
-`ml.bus_matching_model_runs`, `ml.bus_matching_pair_labels` and
-`ml.bus_matching_pair_model_runs`. Everything else this app reads
+`ml.bus_matching_model_runs`, `ml.bus_matching_pair_labels`,
+`ml.bus_matching_pair_model_runs`, and `ml.bus_matching_final_pairs`.
+Everything else this app reads
 (`ml.bus_matching_candidates`, `ml.bus_matching_contestedness`,
 `ml.trip_validity_final`, `ml.trip_validity_fares_final`,
 `ml.trip_validity_route_shapes`, `ml.bus_matching_avl_positions`) is
@@ -131,6 +132,28 @@ CREATE TABLE IF NOT EXISTS ml.bus_matching_pair_model_runs (
 );
 """
 
+# One row per settled bus for the whole month, or per interval for a
+# detected mid-month device swap -- Section 13's deliverable. `method`
+# follows the same convention as `ml.bus_matching_global_assignment`
+# (an explicit unresolved bucket, never a silent drop), just at the
+# month grain: 'excluded_no_avl', 'no_candidates', 'no_evidence',
+# 'hand_confirmed', 'pair_model', 'below_threshold', 'split_detected',
+# 'resolved_after_review', 'needs_review'.
+_FINAL_PAIRS_DDL = """
+CREATE TABLE IF NOT EXISTS ml.bus_matching_final_pairs (
+    bus_id            TEXT NOT NULL,
+    device_id         TEXT,
+    start_date        DATE NOT NULL,
+    end_date          DATE NOT NULL,
+    confidence        DOUBLE PRECISION,
+    n_days_with_data  INTEGER,
+    method            TEXT NOT NULL,
+    notes             TEXT NOT NULL DEFAULT '',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (bus_id, start_date)
+);
+"""
+
 _INDEXES_DDL = """
 CREATE INDEX IF NOT EXISTS bus_matching_trip_labels_bus_date_idx
     ON ml.bus_matching_trip_labels (bus_id, date);
@@ -140,6 +163,10 @@ CREATE INDEX IF NOT EXISTS bus_matching_pair_labels_bus_idx
     ON ml.bus_matching_pair_labels (bus_id);
 CREATE INDEX IF NOT EXISTS bus_matching_pair_model_runs_created_at_idx
     ON ml.bus_matching_pair_model_runs (created_at);
+CREATE INDEX IF NOT EXISTS bus_matching_final_pairs_method_idx
+    ON ml.bus_matching_final_pairs (method);
+CREATE INDEX IF NOT EXISTS bus_matching_final_pairs_device_idx
+    ON ml.bus_matching_final_pairs (device_id);
 """
 
 _DROP_OLD_LABELS_TABLE_DDL = """
@@ -164,4 +191,5 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         conn.execute(_PAIR_LABELS_DDL)
         conn.execute(_PAIR_LABELS_MIGRATION_DDL)
         conn.execute(_PAIR_MODEL_RUNS_DDL)
+        conn.execute(_FINAL_PAIRS_DDL)
         conn.execute(_INDEXES_DDL)
