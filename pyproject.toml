@@ -53,10 +53,23 @@ lint.ignore = ["PLR0913", "D203", "D213", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "SLF001", "ANN201", "D103"]
 "*.ipynb" = ["T201"]
+# Progress-reporting CLI scripts: stdout is the interface, and they are
+# run directly (uv run path/to/script.py) rather than imported, so they
+# are deliberately not packages.
+"ml/*/scripts/*.py" = ["T201", "INP001"]
 
 [tool.ty]
 src.include = ["src", "tests", "ml/trip_validity_model/app"]
-environment.extra-paths = ["ml/trip_validity_model/app"]
+# trip_validity_model/app listed first: it and bus_matching_model/app have
+# same-named sibling modules (features.py, db.py, ...), so with both paths
+# present, `from features import X` resolves against whichever is listed
+# first for any file ty checks -- trip_validity's own files must resolve
+# to themselves. bus_matching_model/app is here only so the notebooks
+# under ml/bus_matching_model/notebooks/ can resolve `gtfs_cache` (a name
+# that doesn't collide); bus_matching_model/app's own files are excluded
+# from the ty pre-commit hook entirely (see .pre-commit-config.yaml) so
+# they never hit the collision themselves.
+environment.extra-paths = ["ml/trip_validity_model/app", "ml/bus_matching_model/app"]
 rules.division-by-zero = "warn"
 rules.possibly-unresolved-reference = "warn"
 rules.unused-ignore-comment = "warn"
