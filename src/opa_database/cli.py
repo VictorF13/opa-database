@@ -1,10 +1,12 @@
 """Click entrypoint for running bronze-layer ingestion and silver-layer loads."""
 
 import datetime
+import logging
 
 import click
 
 from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
+from opa_database.gold import build as gold_build
 from opa_database.silver import afc as silver_afc
 from opa_database.silver import avl as silver_avl
 from opa_database.silver import gtfs as silver_gtfs
@@ -146,3 +148,19 @@ def load_silver_reference(source: str, snapshot_date: datetime.datetime | None) 
     date = snapshot_date.date() if snapshot_date else None
     table = _SILVER_REFERENCE_LOADERS[source](date)
     click.echo(f"Loaded {table}.")
+
+
+@cli.command("build-gold")
+@click.option("--year", type=int, required=True)
+@click.option("--month", type=int, required=True)
+def build_gold(year: int, month: int) -> None:
+    """Build the gold star schema for a given year/month from scratch.
+
+    Args:
+        year (int): Calendar year to build gold for.
+        month (int): Calendar month to build gold for.
+
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    gold_build.build(year, month)
+    click.echo(f"Built gold schema for {year}-{month:02d}.")
