@@ -6,14 +6,14 @@ queryable, analysis-ready PostgreSQL+PostGIS database.
 
 ## Overview
 
-The pipeline follows a three-layer ("medallion") architecture:
+The pipeline follows a two-layer ("medallion") architecture:
 
 ```bash
-raw files (CSV/XML/zip)        bronze                  silver                    gold
-------------------------  -->  --------------------  -->  --------------------  -->  --------------------
-On disk, agency-supplied      Typed, validated,           Per-source, normalized     Cross-source,
-formats, one file per day/    Hive-partitioned Parquet    PostgreSQL+PostGIS         dimensional models
-export/snapshot                (data/bronze/...)          tables (schema `silver`)   (dbt, schema `gold`)
+raw files (CSV/XML/zip)        bronze                  silver
+------------------------  -->  --------------------  -->  --------------------
+On disk, agency-supplied      Typed, validated,           Per-source, normalized
+formats, one file per day/    Hive-partitioned Parquet    PostgreSQL+PostGIS
+export/snapshot                (data/bronze/...)          tables (schema `silver`)
 ```
 
 - **Bronze**: raw agency exports (CSV, nested XML, zipped GTFS feeds) are
@@ -25,16 +25,9 @@ export/snapshot                (data/bronze/...)          tables (schema `silver
   PostgreSQL+PostGIS (schema `silver`). Still strictly per-source (no
   AFC-to-GPS vehicle reconciliation, no GTFS-to-ridership joins here) but
   now typed, deduplicated, indexed, and queryable with SQL/PostGIS.
-- **Gold**: a [dbt](https://docs.getdbt.com/) project (schema `gold`) that
-  builds normalized fact/dimension models on top of silver: a proper
-  star-schema split of the flat AFC feed, a conformed vehicle dimension
-  that reconciles AFC and GPS vehicle identities, and dimensional models
-  for every GTFS table. This is where cross-source joins and analytical
-  modeling happen.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full design
-rationale, and [`docs/gold-layer.md`](docs/gold-layer.md) for the dbt
-project specifically.
+rationale.
 
 ## Data sources
 
@@ -53,7 +46,7 @@ conventions, known data-quality issues) are in
 
 ```text
 src/opa_database/
-    config.py            Settings (env-driven: raw_data_root, bronze_root, silver_dsn)
+    config.py            Settings (env-driven: raw_data_root, bronze_root, db_dsn)
     cli.py                Click CLI: ingest, ingest-reference, load-silver, load-silver-reference
     contracts/            Pandera schemas for each raw source (bronze validation)
     adapters/             Raw file -> validated bronze Parquet, one module per source
@@ -62,12 +55,7 @@ src/opa_database/
         silver.py         Generic idempotent "replace a period" loader for silver tables
     silver/                Bronze Parquet -> silver PostgreSQL+PostGIS, one module per source
 
-gold/                     dbt project: fact/dimension models on top of silver (schema `gold`)
-    models/{afc,gtfs,vehicle}/
-    macros/
-    tests/                 Hand-written composite-key uniqueness/referential-integrity tests
-
-docs/                      Architecture, gold-layer reference, remote access
+docs/                      Architecture reference, remote access
 docker-compose.yml         Postgres+PostGIS and Adminer (web SQL UI)
 ```
 
@@ -75,10 +63,9 @@ docker-compose.yml         Postgres+PostGIS and Adminer (web SQL UI)
 
 ### Prerequisites
 
-- Python 3.12 (see [`docs/gold-layer.md`](docs/gold-layer.md) for why not
-  3.13/3.14)
+- Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- Docker + Docker Compose (for the Postgres+PostGIS silver/gold database)
+- Docker + Docker Compose (for the Postgres+PostGIS silver database)
 
 ### Setup
 
@@ -94,8 +81,9 @@ docker compose up -d   # starts Postgres+PostGIS on :5432 and Adminer on :8080
 | --- | --- |
 | `RAW_DATA_ROOT` | Path to the raw agency data on disk |
 | `BRONZE_ROOT` | Where bronze Parquet files are written |
-| `SILVER_DB_USER` / `SILVER_DB_PASSWORD` / `SILVER_DB_NAME` | Postgres credentials, used both by `docker compose` and by the app |
-| `SILVER_DSN` | Full connection string the pipeline uses to reach Postgres |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Postgres credentials, used both by `docker compose` and by the app |
+| `DB_DSN` | Full connection string the pipeline uses to reach Postgres. Shared by every schema (`silver`, `ml`, ...), not silver-specific |
+| `BIND_HOST` | Optional. Network interface Postgres/Adminer bind to, defaults to `127.0.0.1` (localhost-only). See [`docs/remote-access.md`](docs/remote-access.md) to expose them over Tailscale instead |
 
 ### Running the pipeline
 
@@ -111,10 +99,6 @@ uv run opa-database load-silver avl --year 2023 --month 11
 uv run opa-database load-silver afc --year 2023 --month 11
 uv run opa-database load-silver gtfs --year 2023 --month 11
 uv run opa-database load-silver-reference vehicle_dictionary
-
-# Gold: build the dbt models on top of silver
-uv run dbt run --project-dir gold --profiles-dir gold
-uv run dbt test --project-dir gold --profiles-dir gold
 ```
 
 Each `load-silver`/`load-silver-reference` run is idempotent: re-running it

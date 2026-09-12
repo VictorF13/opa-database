@@ -15,6 +15,11 @@ if TYPE_CHECKING:
     import datetime
     from pathlib import Path
 
+# 2018 is the one legacy year with a fundamentally different raw layout
+# (see `_find_2018_file`/`ingest`): a whole-month file with a header,
+# instead of one headerless file per day under a Portuguese-month folder.
+_LEGACY_WHOLE_MONTH_YEAR = 2018
+
 _PORTUGUESE_MONTHS = {
     1: "JANEIRO",
     2: "FEVEREIRO",
@@ -43,21 +48,90 @@ def _find_month_dir(year: int, month: int) -> Path:
     Folder names are inconsistent across years and even within 2023 (e.g.
     "NOVEMBRO-2023", "ABRIL - 2023", "JULHO - 2023 -"), so this matches on
     the normalized Portuguese month name rather than the literal string.
+
+    Raises on more than one match rather than silently picking one: 2022's
+    raw data has both "MAIO 2022" (31 files, the real month) and a stray
+    "MAIO - 2022" (a single, duplicate day-1 file left over from an
+    abandoned copy) both normalizing to MAIO. Picking whichever directory
+    iteration happens to see first would be non-deterministic and could
+    silently ingest the wrong (incomplete) one, exactly what happened
+    here before this check existed.
     """
     year_dir = settings.raw_data_root / "DADOS_GPS" / str(year)
     target = _PORTUGUESE_MONTHS[month]
-    for entry in year_dir.iterdir():
-        if entry.is_dir() and _normalize(entry.name) == target:
-            return entry
-    msg = f"No AVL folder found for {year}-{month:02d} under {year_dir}"
-    raise FileNotFoundError(msg)
+    matches = [
+        entry
+        for entry in year_dir.iterdir()
+        if entry.is_dir() and _normalize(entry.name) == target
+    ]
+    if not matches:
+        msg = f"No AVL folder found for {year}-{month:02d} under {year_dir}"
+        raise FileNotFoundError(msg)
+    if len(matches) > 1:
+        names = ", ".join(sorted(m.name for m in matches))
+        msg = (
+            f"Multiple AVL folders found for {year}-{month:02d} under "
+            f"{year_dir}: {names}. Resolve the collision manually before "
+            "ingesting (e.g. confirm which is authoritative and remove or "
+            "rename the other)."
+        )
+        raise ValueError(msg)
+    return matches[0]
 
 
-def _read_raw_csv(path: Path) -> pl.DataFrame:
-    df = pl.read_csv(path, has_header=False, new_columns=RAW_COLUMNS)
-    timestamp = pl.col("metric_timestamp").cast(pl.Utf8)
-    timestamp = timestamp.str.strptime(pl.Datetime, "%Y%m%d%H%M%S")
-    return df.with_columns(timestamp)
+def _find_2018_file(month: int) -> Path:
+    """Locate the single raw AVL file for 2018's one-file-per-month layout.
+
+    Unlike every other year, 2018 has no month subfolders: all 12 months
+    sit directly under DADOS_GPS/2018/ as `Paint{MM}2018.csv`, one whole
+    month per file instead of one file per day.
+    """
+    path = settings.raw_data_root / "DADOS_GPS" / "2018" / f"Paint{month:02d}2018.csv"
+    if not path.exists():
+        msg = f"No AVL file found for 2018-{month:02d} at {path}"
+        raise FileNotFoundError(msg)
+    return path
+
+
+# Every raw column except latitude/longitude is required (AvlSchema has no
+# other nullable fields). A handful of rows across the raw history are
+# individually truncated/corrupted (e.g. a write cut short mid-line),
+# landing a null in one of these -- vanishingly rare (1-2 rows out of
+# millions per occurrence) but enough to hit occasionally across years of
+# continuous logging.
+_REQUIRED_COLUMNS = [c for c in RAW_COLUMNS if c not in ("latitude", "longitude")]
+
+
+def _read_raw_csv(path: Path, *, has_header: bool = False) -> pl.DataFrame:
+    # infer_schema_length=0 reads every column as a raw string first (same
+    # reasoning as adapters/gtfs.py): letting Polars guess types from a
+    # sample of early rows is fragile for a headerless file -- a malformed
+    # row anywhere earlier in the file can shift its column-type guess,
+    # then crash later on a perfectly normal value in a column it
+    # mis-inferred as numeric. Pandera's coerce=True (AvlSchema) casts each
+    # column from the raw string into its declared dtype afterward.
+    # has_header=True (2018 only) still uses new_columns to rename, which
+    # simply discards whatever header row is present -- 2018's own header
+    # names differ (no underscores) but its column order already matches
+    # RAW_COLUMNS, so no explicit mapping is needed.
+    df = pl.read_csv(
+        path, has_header=has_header, new_columns=RAW_COLUMNS, infer_schema_length=0
+    )
+    timestamp = pl.col("metric_timestamp").str.strptime(
+        pl.Datetime, "%Y%m%d%H%M%S", strict=False
+    )
+    df = df.with_columns(timestamp)
+    # Drop individually-corrupted rows (a null or empty value in a
+    # required field -- reading everything as string first means a
+    # missing value can show up as "" rather than a true null) rather
+    # than letting the whole day's/month's ingest fail on a handful of
+    # unusable rows out of millions.
+    required_ok = pl.all_horizontal(
+        pl.col(c).is_not_null() & (pl.col(c) != "")
+        for c in _REQUIRED_COLUMNS
+        if c != "metric_timestamp"
+    )
+    return df.filter(required_ok & pl.col("metric_timestamp").is_not_null())
 
 
 def _write_day(df: pl.DataFrame, date: datetime.date) -> Path:
@@ -74,6 +148,19 @@ def ingest(year: int, month: int) -> list[Path]:
     (which would overwrite one another), the last date seen in each file is
     held back and merged with the next file before being written.
 
+    A raw file that exists but is empty (e.g. 2022-01-13) is skipped and
+    treated the same as a missing day, rather than raising. Individual
+    rows with a null in a required field (a handful of truncated/corrupted
+    lines scattered across the raw history, e.g. one row in
+    2022-11-04's file) are dropped rather than failing the whole load.
+
+    2018 is the one exception to "one raw file per day": its whole year
+    lives as 12 already-monthly files (`Paint{MM}2018.csv`) directly under
+    DADOS_GPS/2018/, each with a header row unlike every other year. The
+    per-date write loop below already handles a file spanning many
+    calendar dates (it doesn't assume one date per file), so no other
+    ingest logic changes for this case.
+
     Args:
         year (int): Calendar year to ingest.
         month (int): Calendar month to ingest.
@@ -82,12 +169,24 @@ def ingest(year: int, month: int) -> list[Path]:
         list[Path]: Paths of the bronze parquet files written.
 
     """
-    month_dir = _find_month_dir(year, month)
+    if year == _LEGACY_WHOLE_MONTH_YEAR:
+        csv_paths = [_find_2018_file(month)]
+        has_header = True
+    else:
+        csv_paths = sorted(_find_month_dir(year, month).glob("*.csv"))
+        has_header = False
+
     written: list[Path] = []
     carry: pl.DataFrame | None = None
 
-    for csv_path in sorted(month_dir.glob("*.csv")):
-        df = AvlSchema.validate(_read_raw_csv(csv_path))
+    for csv_path in csv_paths:
+        if csv_path.stat().st_size == 0:
+            # A handful of raw files are present but genuinely empty (e.g.
+            # 2022-01-13) rather than absent. Treat that identically to a
+            # missing day -- a real, if unusual, gap -- instead of letting
+            # Polars raise on the empty read.
+            continue
+        df = AvlSchema.validate(_read_raw_csv(csv_path, has_header=has_header))
         if carry is not None:
             df = pl.concat([carry, df])
 

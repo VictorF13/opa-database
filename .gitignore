@@ -6,6 +6,12 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache
+.pytest_cache
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv
@@ -13,14 +19,15 @@ wheels/
 # Environment variables
 .env
 
-# Local bronze/gold layer output
+# Local bronze/silver layer output
 data/
 
-# dbt-generated artifacts
-gold/target/
-gold/logs/
-gold/dbt_packages/
-gold/.user.yml
+# Regenerable per-date feature checkpoints (ml/bus_matching_model)
+ml/bus_matching_model/artifacts/features/
+ml/bus_matching_model/artifacts/features_v2/
+
+# Claude Code local state
+.claude/
 
 # macOS
 .DS_Store

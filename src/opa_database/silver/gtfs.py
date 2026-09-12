@@ -6,9 +6,11 @@ export supersedes it, so there's no "November's schedule" the way there's
 "November's ridership." Same resolution as AFC's dump_date-vs-service_date
 split: `replace_period()`'s period here is the export date itself
 (`feed_version_date`), one snapshot fully replacing itself if reloaded.
+Every table is partitioned by day to match — each export IS one complete,
+self-contained snapshot, its true natural unit.
 `shapes`/`stops` get a generated PostGIS point per row; aggregating shape
-points into a `LINESTRING` per route is left for a gold/dbt model, same as
-the AFC trips/boardings normalization.
+points into a `LINESTRING` per route is left for a downstream consumer,
+same as the AFC trips/boardings normalization.
 """
 
 from __future__ import annotations
@@ -19,9 +21,14 @@ from typing import LiteralString
 import polars as pl
 
 from opa_database.config import settings
-from opa_database.loaders.silver import get_connection, replace_period
+from opa_database.loaders.silver import (
+    IndexSpec,
+    daily_partition_name,
+    get_connection,
+    replace_period,
+)
 
-_TABLE_DDL: dict[str, LiteralString] = {
+_PARENT_DDL: dict[str, LiteralString] = {
     "agency": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_agency (
             feed_version_date date NOT NULL,
@@ -32,7 +39,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             agency_lang text,
             agency_phone text,
             agency_fare_url text
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "calendar": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_calendar (
@@ -47,15 +54,16 @@ _TABLE_DDL: dict[str, LiteralString] = {
             sunday integer NOT NULL,
             start_date date NOT NULL,
             end_date date NOT NULL
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "calendar_dates": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_calendar_dates (
             feed_version_date date NOT NULL,
             service_id text NOT NULL,
             date date NOT NULL,
-            exception_type integer NOT NULL
-        );
+            exception_type integer NOT NULL,
+            copied_from_feed_version_date date
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "fare_attributes": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_fare_attributes (
@@ -66,7 +74,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             payment_method integer NOT NULL,
             transfers integer,
             transfer_duration integer
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "fare_rules": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_fare_rules (
@@ -76,7 +84,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             origin_id text,
             destination_id text,
             contains_id text
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "routes": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_routes (
@@ -90,7 +98,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             route_url text,
             route_color text,
             route_text_color text
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "shapes": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_shapes (
@@ -103,7 +111,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             geom geometry(Point, 4326)
                 GENERATED ALWAYS AS
                 (ST_SetSRID(ST_MakePoint(shape_pt_lon, shape_pt_lat), 4326)) STORED
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "stops": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_stops (
@@ -123,7 +131,7 @@ _TABLE_DDL: dict[str, LiteralString] = {
             geom geometry(Point, 4326)
                 GENERATED ALWAYS AS
                 (ST_SetSRID(ST_MakePoint(stop_lon, stop_lat), 4326)) STORED
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "stop_times": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_stop_times (
@@ -136,8 +144,9 @@ _TABLE_DDL: dict[str, LiteralString] = {
             stop_headsign text,
             pickup_type integer,
             drop_off_type integer,
-            shape_dist_traveled double precision
-        );
+            shape_dist_traveled double precision,
+            copied_from_feed_version_date date
+        ) PARTITION BY RANGE (feed_version_date);
     """,
     "trips": """
         CREATE TABLE IF NOT EXISTS silver.gtfs_trips (
@@ -151,127 +160,52 @@ _TABLE_DDL: dict[str, LiteralString] = {
             block_id text,
             shape_id text,
             wheelchair_accessible integer
-        );
+        ) PARTITION BY RANGE (feed_version_date);
     """,
 }
 
-_INDEXES: dict[str, tuple[tuple[str, LiteralString], ...]] = {
-    "agency": (
-        (
-            "gtfs_agency_fvd_idx",
-            "CREATE INDEX gtfs_agency_fvd_idx "
-            "ON silver.gtfs_agency (feed_version_date);",
-        ),
-    ),
+# Created on each partition after it's bulk-loaded, rather than
+# incrementally maintained per-row during COPY (see replace_period's
+# docstring).
+_INDEXES: dict[str, tuple[IndexSpec, ...]] = {
+    "agency": (IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),),
     "calendar": (
-        (
-            "gtfs_calendar_fvd_idx",
-            "CREATE INDEX gtfs_calendar_fvd_idx "
-            "ON silver.gtfs_calendar (feed_version_date);",
-        ),
-        (
-            "gtfs_calendar_service_id_idx",
-            "CREATE INDEX gtfs_calendar_service_id_idx "
-            "ON silver.gtfs_calendar (service_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("service_id_idx", unique=False, definition="(service_id)"),
     ),
     "calendar_dates": (
-        (
-            "gtfs_calendar_dates_fvd_idx",
-            "CREATE INDEX gtfs_calendar_dates_fvd_idx "
-            "ON silver.gtfs_calendar_dates (feed_version_date);",
-        ),
-        (
-            "gtfs_calendar_dates_service_id_idx",
-            "CREATE INDEX gtfs_calendar_dates_service_id_idx "
-            "ON silver.gtfs_calendar_dates (service_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("service_id_idx", unique=False, definition="(service_id)"),
     ),
     "fare_attributes": (
-        (
-            "gtfs_fare_attributes_fvd_idx",
-            "CREATE INDEX gtfs_fare_attributes_fvd_idx "
-            "ON silver.gtfs_fare_attributes (feed_version_date);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
     ),
     "fare_rules": (
-        (
-            "gtfs_fare_rules_fvd_idx",
-            "CREATE INDEX gtfs_fare_rules_fvd_idx "
-            "ON silver.gtfs_fare_rules (feed_version_date);",
-        ),
-        (
-            "gtfs_fare_rules_fare_id_idx",
-            "CREATE INDEX gtfs_fare_rules_fare_id_idx "
-            "ON silver.gtfs_fare_rules (fare_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("fare_id_idx", unique=False, definition="(fare_id)"),
     ),
     "routes": (
-        (
-            "gtfs_routes_fvd_idx",
-            "CREATE INDEX gtfs_routes_fvd_idx "
-            "ON silver.gtfs_routes (feed_version_date);",
-        ),
-        (
-            "gtfs_routes_route_id_idx",
-            "CREATE INDEX gtfs_routes_route_id_idx ON silver.gtfs_routes (route_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("route_id_idx", unique=False, definition="(route_id)"),
     ),
     "shapes": (
-        (
-            "gtfs_shapes_fvd_idx",
-            "CREATE INDEX gtfs_shapes_fvd_idx "
-            "ON silver.gtfs_shapes (feed_version_date);",
-        ),
-        (
-            "gtfs_shapes_shape_id_idx",
-            "CREATE INDEX gtfs_shapes_shape_id_idx ON silver.gtfs_shapes (shape_id);",
-        ),
-        (
-            "gtfs_shapes_geom_idx",
-            "CREATE INDEX gtfs_shapes_geom_idx "
-            "ON silver.gtfs_shapes USING GIST (geom);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("shape_id_idx", unique=False, definition="(shape_id)"),
+        IndexSpec("geom_idx", unique=False, definition="USING GIST (geom)"),
     ),
     "stops": (
-        (
-            "gtfs_stops_fvd_idx",
-            "CREATE INDEX gtfs_stops_fvd_idx ON silver.gtfs_stops (feed_version_date);",
-        ),
-        (
-            "gtfs_stops_stop_id_idx",
-            "CREATE INDEX gtfs_stops_stop_id_idx ON silver.gtfs_stops (stop_id);",
-        ),
-        (
-            "gtfs_stops_geom_idx",
-            "CREATE INDEX gtfs_stops_geom_idx ON silver.gtfs_stops USING GIST (geom);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("stop_id_idx", unique=False, definition="(stop_id)"),
+        IndexSpec("geom_idx", unique=False, definition="USING GIST (geom)"),
     ),
     "stop_times": (
-        (
-            "gtfs_stop_times_fvd_idx",
-            "CREATE INDEX gtfs_stop_times_fvd_idx "
-            "ON silver.gtfs_stop_times (feed_version_date);",
-        ),
-        (
-            "gtfs_stop_times_trip_id_idx",
-            "CREATE INDEX gtfs_stop_times_trip_id_idx "
-            "ON silver.gtfs_stop_times (trip_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("trip_id_idx", unique=False, definition="(trip_id)"),
     ),
     "trips": (
-        (
-            "gtfs_trips_fvd_idx",
-            "CREATE INDEX gtfs_trips_fvd_idx ON silver.gtfs_trips (feed_version_date);",
-        ),
-        (
-            "gtfs_trips_trip_id_idx",
-            "CREATE INDEX gtfs_trips_trip_id_idx ON silver.gtfs_trips (trip_id);",
-        ),
-        (
-            "gtfs_trips_route_id_idx",
-            "CREATE INDEX gtfs_trips_route_id_idx ON silver.gtfs_trips (route_id);",
-        ),
+        IndexSpec("fvd_idx", unique=False, definition="(feed_version_date)"),
+        IndexSpec("trip_id_idx", unique=False, definition="(trip_id)"),
+        IndexSpec("route_id_idx", unique=False, definition="(route_id)"),
     ),
 }
 
@@ -299,7 +233,12 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
         "start_date",
         "end_date",
     ),
-    "calendar_dates": ("service_id", "date", "exception_type"),
+    "calendar_dates": (
+        "service_id",
+        "date",
+        "exception_type",
+        "copied_from_feed_version_date",
+    ),
     "fare_attributes": (
         "fare_id",
         "price",
@@ -351,6 +290,7 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
         "pickup_type",
         "drop_off_type",
         "shape_dist_traveled",
+        "copied_from_feed_version_date",
     ),
     "trips": (
         "route_id",
@@ -365,7 +305,7 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_TABLES = tuple(_TABLE_DDL)
+_TABLES = tuple(_PARENT_DDL)
 
 
 def _find_snapshot_days(year: int, month: int) -> list[int]:
@@ -411,7 +351,7 @@ def load(year: int, month: int) -> None:
 
     A month can contain zero, one, or several feed exports (Nov 2023 had
     two). Every table is loaded once per export day found, keyed by that
-    day as its own single-day `feed_version_date` period.
+    day as its own single-day `feed_version_date` partition.
 
     Args:
         year (int): Calendar year to load.
@@ -424,13 +364,14 @@ def load(year: int, month: int) -> None:
             date = datetime.date(year, month, day)
             for table in _TABLES:
                 df = _read_table(table, year, month, day)
+                partition = daily_partition_name(f"gtfs_{table}", date)
                 replace_period(
                     conn,
                     f"silver.gtfs_{table}",
+                    partition,
                     df,
-                    time_column="feed_version_date",
-                    start=date,
-                    end=date + datetime.timedelta(days=1),
-                    table_ddl=_TABLE_DDL[table],
+                    partition_start=date,
+                    partition_end=date + datetime.timedelta(days=1),
+                    parent_ddl=_PARENT_DDL[table],
                     indexes=_INDEXES[table],
                 )
