@@ -6,6 +6,7 @@ import logging
 import click
 
 from opa_database.adapters import afc, avl, gtfs, vehicle_dictionary
+from opa_database.diamond import build as diamond_build
 from opa_database.gold import build as gold_build
 from opa_database.silver import afc as silver_afc
 from opa_database.silver import avl as silver_avl
@@ -164,3 +165,19 @@ def build_gold(year: int, month: int) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     gold_build.build(year, month)
     click.echo(f"Built gold schema for {year}-{month:02d}.")
+
+
+@cli.command("build-diamond")
+@click.option("--year", type=int, required=True)
+@click.option("--month", type=int, required=True)
+def build_diamond(year: int, month: int) -> None:
+    """Build diamond.stop_arrivals for a given year/month from scratch.
+
+    Args:
+        year (int): Calendar year to build diamond for.
+        month (int): Calendar month to build diamond for.
+
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    diamond_build.build(year, month)
+    click.echo(f"Built diamond.stop_arrivals for {year}-{month:02d}.")
