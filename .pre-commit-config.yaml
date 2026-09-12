@@ -23,7 +23,10 @@ repos:
         # the standing call to leave this app's lint/format debt for
         # later too. `scripts/` is excluded for the same reason -- it
         # imports those same sibling modules by bare name.
-        exclude: ^ml/bus_matching_model/(app|scripts)/
+        # tools/trip_viewer/app is excluded for the same bare-sibling-import
+        # reason (its own `db`/`maps`), not added to extra-paths -- it's a
+        # throwaway exploration tool, same standing call as the two above.
+        exclude: ^(ml/bus_matching_model/(app|scripts)|tools/trip_viewer/app)/
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.11.22
     hooks:
