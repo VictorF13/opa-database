@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-09-12)
+
+### Features
+
+- Add diamond layer, interpolated bus stop arrival times for Nov 2023
+  ([#34](https://github.com/VictorF13/opa-database/pull/34),
+  [`36364bf`](https://github.com/VictorF13/opa-database/commit/36364bfd2961d7d1db1abdfa802e84691cffc608))
+
+- Wire diamond build into the CLI ([#34](https://github.com/VictorF13/opa-database/pull/34),
+  [`36364bf`](https://github.com/VictorF13/opa-database/commit/36364bfd2961d7d1db1abdfa802e84691cffc608))
+
+
 ## v1.1.0 (2026-09-12)
 
 ### Bug Fixes

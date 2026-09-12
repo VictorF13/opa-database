@@ -1,6 +1,6 @@
 [project]
 name = "opa-database"
-version = "1.1.0"
+version = "1.2.0"
 description = "Initial setup for OPA Database."
 readme = "README.md"
 authors = [{ name = "VictorF13", email = "victorabreuf13@gmail.com" }]
