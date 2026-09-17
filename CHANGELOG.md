@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-09-17)
+
+### Features
+
+- Add trip viewer Streamlit app for gold/diamond exploration
+  ([#35](https://github.com/VictorF13/opa-database/pull/35),
+  [`735fc6b`](https://github.com/VictorF13/opa-database/commit/735fc6bc2560e8e6f7eaea9323a57a69357b457e))
+
+
 ## v1.2.0 (2026-09-12)
 
 ### Features
