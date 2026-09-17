@@ -95,7 +95,9 @@ jobs:
                   git push origin develop
 
     prep-release-pr:
-        if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+        if: >-
+            github.ref == 'refs/heads/develop' && github.event_name == 'push'
+            && !startsWith(github.event.head_commit.message, 'chore(release):')
         runs-on: ubuntu-latest
         needs: [validate, test]
         steps:
@@ -114,6 +116,12 @@ jobs:
               id: prep
               run: |
                   git fetch origin main develop
+                  if [ "$(git rev-list --count origin/main..origin/develop)" -eq 0 ]; then
+                    echo "develop has no commits beyond main; nothing to release." >> "$GITHUB_STEP_SUMMARY"
+                    echo "has_commits=false" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+                  echo "has_commits=true" >> "$GITHUB_OUTPUT"
                   PREVIEW_LOG=$(git log origin/main..origin/develop --format="- %h %s" --no-merges)
                   {
                     echo "preview_log<<EOF"
@@ -124,6 +132,7 @@ jobs:
                   NEXT_VERSION=$(semantic-release version --print)
                   echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
             - name: Open or update release PR
+              if: steps.prep.outputs.has_commits == 'true'
               env:
                   GH_TOKEN: ${{ secrets.RELEASE_PAT }}
               run: |
