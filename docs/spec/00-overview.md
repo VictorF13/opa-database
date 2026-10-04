@@ -95,7 +95,7 @@ Each decision is elaborated in the document named in the last column.
 | D-13 | Fare card identifiers are pseudonymized in gold; raw identifiers stay in restricted silver | Travel histories are personal data | 11 |
 | D-14 | One repository, several packages, managed only with uv | Clear boundaries without cross-repository version coupling | 13 |
 | D-15 | Plain SQL and Python; no transformation framework; no orchestrator service at first | Fewer moving parts; revisit by decision record | 13, 15 |
-| D-16 | `develop` is the protected default branch; squash merges; an automated release pull request; `main` always equals the latest release | Linear history, standard automation, a stable reference for deployment | 14 |
+| D-16 | `develop` is the protected default branch, merged into by squash; `main` is the production branch, where every commit is a release; an automated release pull request from `develop` into `main`, merged with a merge commit | Linear history on `develop`, a visible and deliberate act of releasing, and two branches that never drift apart | 14 |
 | D-17 | One host with three storage tiers; local backups, with an off-machine copy required before the system is declared production-ready | Matches the hardware that exists while naming the gap honestly | 03, 12 |
 | D-18 | Build order: one reference month first (2023-11), then all of 2023, then every available year | A complete vertical slice proves the design before it is scaled | 17 |
 

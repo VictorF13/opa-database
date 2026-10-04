@@ -4,7 +4,7 @@ One `DataFrameModel` per GTFS table, following the standard GTFS reference
 columns, plus one adapter-added field: `CalendarDatesSchema` and
 `StopTimesSchema` each carry a `copied_from_feed_version_date` column
 recording when that table's data was substituted from a different export
-(see those classes' docstrings and `docs/architecture.md`).
+(see those classes' docstrings and `docs/archive/architecture.md`).
 `stops_unicode.txt` is deliberately excluded: it is a UTF-16 duplicate of
 `stops.txt` kept for legacy consumers, not a distinct table.
 
@@ -62,7 +62,7 @@ class CalendarDatesSchema(pa.DataFrameModel):
     A handful of raw exports are missing this file entirely; for those,
     `adapters/gtfs.py` substitutes the nearest other export's data and
     stamps `copied_from_feed_version_date` with that export's date (see
-    `docs/architecture.md`). Null for every normally-sourced row.
+    `docs/archive/architecture.md`). Null for every normally-sourced row.
     """
 
     service_id: str
@@ -169,7 +169,7 @@ class StopTimesSchema(pa.DataFrameModel):
     One raw export is missing this file entirely; for that one,
     `adapters/gtfs.py` substitutes the nearest other export's data and
     stamps `copied_from_feed_version_date` with that export's date (see
-    `docs/architecture.md`). Null for every normally-sourced row.
+    `docs/archive/architecture.md`). Null for every normally-sourced row.
     """
 
     trip_id: str

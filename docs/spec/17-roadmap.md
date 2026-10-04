@@ -58,7 +58,7 @@ Acceptance:
 
 - The acceptance commands of [13-engineering.md](13-engineering.md) pass
   on a clean clone.
-- Acceptance items 1 to 4 of [14-delivery.md](14-delivery.md) are
+- Acceptance items 1 to 5 of [14-delivery.md](14-delivery.md) are
   demonstrated with a trivial change.
 
 ### P1. Platform

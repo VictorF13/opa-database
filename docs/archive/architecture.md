@@ -1,5 +1,9 @@
 # Architecture
 
+> **Archived.** This document describes the implementation that predates
+> the [specification](../spec/README.md). It is kept for reference only,
+> is not a design input for new work, and is out of date in places.
+
 OPA Database ingests four raw sources describing Fortaleza's public transit
 system and moves them through two layers: **bronze** (typed raw data) and
 **silver** (per-source normalized SQL tables). Each layer has a different
