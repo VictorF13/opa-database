@@ -5,7 +5,7 @@ their formats, and what has been measured about them. It is the factual
 basis for the design in the documents that follow.
 
 All statements marked **Profile** were measured on a November 2023 sample
-and are re-measured on the full raw store in phase P0 (see the
+and are re-measured on the full raw store in phases P2 and P4 (see the
 [README](README.md#profile-facts)).
 
 ## 1. Where the raw data lives
@@ -15,8 +15,8 @@ the system reads and never writes to. The local machine holds a verified
 mirror. See [04-raw-and-bronze.md](04-raw-and-bronze.md).
 
 The exact contents of the remote store (which years exist for each source,
-total size, any formats not described below) are not yet inventoried. The
-first task of the roadmap is to list and profile it.
+total size, any formats not described below) are not yet inventoried. An
+early phase of the roadmap lists and profiles it.
 
 ## 2. Sources at a glance
 
@@ -116,7 +116,7 @@ Movimentos
 - The attribute list above is what is known. Files may carry attributes
   or elements beyond it; bronze keeps all of them (`BRZ-6`).
 - Earlier years (before 2020) use a different format (per-month folders of
-  `Viagenssigom<date>.csv` files). Its structure is profiled in P0.
+  `Viagenssigom<date>.csv` files). Its structure is profiled in P2.
 
 ### 4.2 Characteristics (Profile)
 

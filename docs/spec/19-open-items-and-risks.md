@@ -16,7 +16,7 @@ design choice, writing a decision record.
 | O-5 | Do the supervisor and the agency agree with the privacy design (`SEC-20` to `SEC-24`)? | The design as specified | P4 |
 | O-6 | What are the legal basis, the data sharing terms, and the retention period? | Treat all tap-level data as personal; record what is known in the governance document (`SEC-27`) | P4 |
 | O-7 | Who owns the remote raw store account in the long term? | Mirror everything locally as early as possible, so that losing the account is not fatal | P2 |
-| O-8 | Is `pg_duckdb` adopted (`PLT-24`)? | No; the lake is queried through the DuckDB catalog (`OPS-14`) | P1 |
+| O-8 | Is `pg_duckdb` adopted (`PLT-24`)? | No; the lake is queried with DuckDB directly (`OPS-14`) | P1 |
 | O-9 | What are the units of AVL speed and odometer? | Speed in km/h and odometer in meters, to be verified | P4 |
 | O-10 | Is 03:00 local the right operational-day cutoff? | 03:00 | P4 |
 | O-11 | Which Python minor version? | The newest supported by every runtime dependency (`ENG-16`) | P0 |
@@ -30,6 +30,8 @@ design choice, writing a decision record.
 | O-19 | When is earlier code removed from the working tree? | At P0, after tagging and preserving it on a maintenance branch (`COX-13`) | P0 |
 | O-20 | How many months of `silver.avl_pings` are published in the serving database? | The reference year (`PLT-50`) | P10 |
 | O-21 | What is the exact service-area box? | The initial box of `geo.area_bbox`, widened to the full metropolitan service area after profiling | P4 |
+| O-23 | Do the table format, dbt, and the orchestrator work together as specified? | Yes; the stack validation of P1 confirms each point, and a failing point gets a recorded fallback (`17-roadmap.md`) | P1 |
+| O-24 | When does the project move to the next major version of dbt? | It stays on the current stable line until the DuckDB adapter supports the new one (`ENG-66`) | Later |
 | O-22 | What may leave the project, and in what form? | Aggregates with at least 10 cards per cell, or an explicit recorded review (`SEC-24`) | P8 |
 
 ## 2. Risks
@@ -47,7 +49,7 @@ design choice, writing a decision record.
 | R-9 | Personal data is exposed | Harm to riders; legal exposure | Pseudonymous keys everywhere but restricted silver; encrypted backups; no real data in the repository; quarterly access review |
 | R-10 | The pseudonymization key is lost | Card keys cannot be reproduced | Separate secrets backup; offline copy held by the owner |
 | R-11 | Building the system disturbs a deployment people depend on | Loss of access or data for current users | The coexistence rules, the protected declaration, and the test that enforces it |
-| R-12 | A tool is immature or changes behavior | Rework | Pinned versions; upgrades by reviewed pull request; optional components stay optional |
+| R-12 | Parts of the stack are young or in transition: the table format reached version 1.0 in 2026, dbt is moving to a new major version, and its DuckDB adapter is community-maintained | Rework | Stack validation in P1 with recorded fallbacks; pinned versions; upgrades by reviewed pull request and runbook; the data stays plain Parquet and the logic plain SQL whichever tool reads them |
 | R-13 | The specification is larger than the capacity to build it | Nothing finishes | Phases that each deliver something usable; a vertical slice (M1) before scale |
 | R-14 | Self-improvement drifts toward confident error | Published data degrades without anyone noticing | Frozen test set, gates, no regression rule, versioned releases, drift monitoring |
 | R-15 | Reference data is wrong (a zone, an exception, a code meaning) | Systematic misclassification | Provenance on every row; validation against observation; changes by review |

@@ -5,8 +5,23 @@
 OPA Database turns the raw operational data of Fortaleza's bus system into
 a research database that people can trust. It ingests fare collection
 records, vehicle GPS positions, schedules, and reference lists, and
-produces a clean model of what every bus actually did: where it was, what
-route it was serving, when it reached each stop, and who boarded where.
+produces a clean account of what every bus actually did.
+
+It is a foundation, not a set of answers. Its product is the cleaned
+record itself:
+
+- which device was on which bus, from when to when;
+- when each trip really started and ended, and which operator records are
+  wrong, and how;
+- what every GPS point was: in service on a route, stopped, laying over,
+  heading to or from the garage;
+- which fare taps are passengers, and where each one boarded;
+- when each bus passed each stop.
+
+Everything else is built on top of it and is not part of it: headways and
+other service measures today, and models such as alighting estimation
+later. The foundation is designed so that those need nothing more from
+the raw data.
 
 ## 2. The problem
 
@@ -41,7 +56,7 @@ and never lose a single record while doing so.
 | G1 | Trustworthy | Every value can be traced to a raw file, a rule, and a model version. Known data problems are categorized, not hidden. |
 | G2 | Complete | Every fare, every operator trip record, and every GPS ping is accounted for with a category and a reason. Nothing disappears silently. |
 | G3 | Reproducible | The whole database can be rebuilt from raw files, reference data, labels, and code. Published data is versioned. |
-| G4 | Resilient | Data survives a disk failure, an operator mistake, and a bad build. Recovery is tested, not assumed. |
+| G4 | Resilient | Data survives a disk failure, an operator mistake, and a bad run. Recovery is tested, not assumed. |
 | G5 | Fast | Queries and builds use the host's full capacity. The joins the research needs are designed for, not discovered later. |
 | G6 | Scalable | The design holds for every year of data the agency has, not one month. |
 | G7 | Self-improving | Human corrections flow back into the models through a gated loop, indefinitely. |
@@ -67,12 +82,12 @@ and never lose a single record while doing so.
 | PR-2 | **Bronze is lossless.** Nothing is cleaned, dropped, or reinterpreted before silver. |
 | PR-3 | **Categorize and correct, never delete.** A wrong or odd record is kept, labeled, and, where possible, accompanied by a corrected value and the reason for it. |
 | PR-4 | **Observation beats declaration.** What the GPS track shows the vehicle did is the backbone. What the driver entered is evidence reconciled against it. |
-| PR-5 | **Everything is accounted for.** Counts are conserved from layer to layer, and a build that cannot prove it fails. |
+| PR-5 | **Everything is accounted for.** Counts are conserved from layer to layer, and a run that cannot prove it fails. |
 | PR-6 | **Deterministic and idempotent.** The same inputs produce the same outputs, with the same identifiers, every time. Re-running a step is always safe. |
-| PR-7 | **The lake is the record; the database serves.** Data lives as Parquet files. PostgreSQL is rebuilt from them at any time. |
+| PR-7 | **The lake is the record; the database serves.** Data lives in the lake. The served tables are rebuilt from it at any time. |
 | PR-8 | **Evidence is explicit.** Every inferred fact carries a method, a confidence, and the evidence behind it. "Unknown" is a valid answer. |
 | PR-9 | **Measured, not assumed.** Thresholds come from the data and are recorded with their justification. Quality gates are numbers, checked automatically. |
-| PR-10 | **Right-sized tooling.** One host, standard open-source tools, no platform the team cannot operate alone. |
+| PR-10 | **Standard tools, used as intended.** What an established open-source tool already does is not rewritten. Custom code is reserved for what is specific to this problem. Everything runs on one host that the team can operate alone. |
 
 ## 6. Key decisions
 
@@ -81,23 +96,24 @@ Each decision is elaborated in the document named in the last column.
 | ID | Decision | Why | Where |
 | --- | --- | --- | --- |
 | D-01 | Five layers: raw, bronze, silver, inference, gold | One job per layer; conventional medallion layout with inference as a named part of the silver tier | 02 |
-| D-02 | Data is stored as Parquet in a file lake; PostgreSQL with PostGIS is the serving database | Columnar files are an order of magnitude smaller and faster for telemetry, and make the database disposable | 02, 10 |
-| D-03 | Heavy computation runs outside the database (Polars, DuckDB, Python) | Per-vehicle sequential algorithms and large scans do not belong in a row store | 02, 10 |
+| D-02 | Data is stored in a lake of Parquet files under an open, transactional table format; PostgreSQL with PostGIS is the serving database | Columnar files are an order of magnitude smaller and faster for telemetry; the table format gives atomic replacement and snapshots; the served tables become disposable | 02, 10 |
+| D-03 | Heavy computation runs outside the serving database, on the lake (DuckDB, dbt, Python) | Per-vehicle sequential algorithms and large scans do not belong in a row store | 02, 10 |
 | D-04 | Raw files are fetched from the remote raw store, read-only, verified by checksum | The pipeline never assumes files are already on the machine | 04 |
 | D-05 | Bronze is keyed by source file and keeps every row and field as text | Removes the whole class of overwrite and silent-drop defects | 04 |
 | D-06 | The observed vehicle timeline is the backbone; operator trip records are reconciled against it | The GPS track is what happened; the trip record is what someone typed | 07 |
 | D-07 | Bus and device linkage combines several kinds of evidence; no single source is required | Each evidence source is missing for part of the fleet | 07 |
 | D-08 | Route patterns are first-class and can be learned from observation | Schedules are incomplete and sometimes wrong | 07 |
-| D-09 | Accounting invariants fail the build | "No data lost" must be proven on every run | 09 |
+| D-09 | Accounting invariants block the run and the release | "No data lost" must be proven on every run | 09 |
 | D-10 | Identifiers are deterministic functions of natural keys | Identifiers survive rebuilds, so saved analyses keep working | 02 |
-| D-11 | Published data changes only by promoting a versioned release | Research results stay reproducible while models improve | 09 |
+| D-11 | Published data changes only by publishing a release: a named snapshot of the lake that passed every gate | Research results stay reproducible while models improve | 09 |
 | D-12 | Models are released through gates measured on a frozen, human-labeled test set | Self-improvement without drifting into confident error | 07, 16 |
 | D-13 | Fare card identifiers are pseudonymized in gold; raw identifiers stay in restricted silver | Travel histories are personal data | 11 |
-| D-14 | One repository, several packages, managed only with uv | Clear boundaries without cross-repository version coupling | 13 |
-| D-15 | Plain SQL and Python; no transformation framework; no orchestrator service at first | Fewer moving parts; revisit by decision record | 13, 15 |
+| D-14 | One repository holding one Python package and one dbt project, managed only with uv | Easy to navigate and to maintain by a small team; boundaries are enforced inside the package | 13 |
+| D-15 | dbt defines, tests, and documents every SQL transformation; Dagster orchestrates everything | They are the established tools for these jobs; using them replaces custom code that only its author would understand, and the skills transfer when people change | 02, 13, 15 |
 | D-16 | `develop` is the protected default branch, merged into by squash; `main` is the production branch, where every commit is a release; an automated release pull request from `develop` into `main`, merged with a merge commit; `main` is merged back into `develop` after every release | One commit per change on `develop`, a visible and deliberate act of releasing, a changelog in the repository, and two branches that stay level | 14 |
 | D-17 | One host with three storage tiers; local backups, with an off-machine copy required before the system is declared production-ready | Matches the hardware that exists while naming the gap honestly | 03, 12 |
 | D-18 | Build order: one reference month first (2023-11), then all of 2023, then every available year | A complete vertical slice proves the design before it is scaled | 17 |
+| D-19 | Each inference component starts with the simplest method that can work and adopts its full method when the quality gates demand it; both are specified | Complexity is earned by evidence, and the destination is known in advance | 07 |
 
 ## 7. What "done" means
 

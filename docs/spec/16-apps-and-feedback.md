@@ -99,7 +99,9 @@ without ever putting published data at risk.
   prediction hidden, may be assigned to `test` and frozen. This keeps
   the frozen test set an unbiased sample.
 - **APP-25 (MUST)** `opa labels snapshot` exports every label table to
-  `lake/exports/labels/<timestamp>/` with a content digest. A model
+  `exports/labels/<timestamp>/` on the BULK tier with a content digest,
+  and loads it into the lake so that inference reads labels from there
+  (`ARC-2`). A model
   release records the digest of the snapshot it was trained on.
 - **APP-26 (MUST)** Labels can be imported from files that follow the
   import contract: natural key, verdict, author, time, and whatever is
@@ -156,14 +158,14 @@ without ever putting published data at risk.
   (nothing changes)                               model release
                                                           |
                                                           v
-                                build --> data release --> publish
+                          materialize --> data release --> publish
 ```
 
 - **APP-40 (MUST)** The loop runs for as long as the system is used. It
   has no end state.
-- **APP-41 (MUST)** Training or tuning is started on a schedule (monthly)
-  or when at least `loop.retrain_min_labels` (default 100) new labels
-  exist, whichever comes first.
+- **APP-41 (MUST)** Training or tuning is an orchestrator job, started on
+  a schedule (monthly) or when at least `loop.retrain_min_labels`
+  (default 100) new labels exist, whichever comes first.
 - **APP-42 (MUST)** Training and tuning use only labels that are not
   frozen. Evaluation uses the frozen test set and the independent checks
   of `INF-93`.
@@ -175,9 +177,9 @@ without ever putting published data at risk.
   with its version, the label snapshot digest, the code version, the
   parameters, and its metrics. Its artifact is stored in the model store
   with a digest.
-- **APP-45 (MUST)** A model release reaches published data only through a
-  new build and a new data release (`ARC-40`). Published numbers never
-  change underneath a reader.
+- **APP-45 (MUST)** A model release reaches published data only through
+  rematerialized months and a new data release (`ARC-40`). Published
+  numbers never change underneath a reader.
 - **APP-46 (MUST)** The loop's own health is tracked: flags opened and
   closed, time to triage, labels added, size of the frozen test set,
   rate of disagreement between models and labels, and the trend of every

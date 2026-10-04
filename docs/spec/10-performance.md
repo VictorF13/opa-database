@@ -23,18 +23,18 @@ Every requirement below serves one or more of these.
 
 ## 2. The lake
 
-- **PERF-1 (MUST)** Event tables are partitioned by day (W1, W8). A day
-  of one table is one file.
-- **PERF-2 (MUST)** Within a file, rows are sorted by entity, then time:
+- **PERF-1 (MUST)** Large event tables are physically partitioned by day
+  in the lake (W1, W8), declared as a property of the table.
+- **PERF-2 (MUST)** Tables declare a sort order of entity, then time,
+  which the table format maintains in every file:
   `avl_pings` and `ping_activity` by `(device_id, metric_timestamp,
   ping_seq)`; AFC tables by `(bus_id, boarding_at)` or `(bus_id,
   trip_opened_at)`; run-level tables by `(device_id, start_at)`. One
   entity's rows are contiguous, row-group statistics prune by entity
   (W1), and tables that share a key and order join by merge (W7).
 - **PERF-3 (MUST)** Row groups hold 100,000 to 150,000 rows. Files are
-  between 100 MB and 1 GB wherever the daily volume allows. No step
-  leaves thousands of small files; tables with small days are compacted
-  by month.
+  between 100 MB and 1 GB wherever the daily volume allows. Small files
+  are merged by scheduled maintenance (`DQ-23`).
 - **PERF-4 (MUST)** Columns use the narrowest correct type. Identifiers
   and codes are dictionary-encoded. Column statistics are written.
   Compression is Zstandard.
@@ -48,7 +48,7 @@ Every requirement below serves one or more of these.
   the entity and are evaluated per entity-day in sorted order (a merge),
   or with the engine's range-join operator. They are never a cross
   product filtered afterwards.
-- **PERF-7 (MUST)** Geometry is prepared once per build and reused:
+- **PERF-7 (MUST)** Geometry is prepared once per run and reused:
   patterns as projected coordinate arrays with a spatial index, stops
   with their progress precomputed, zones as prepared polygons.
   Coordinates are projected in bulk. Projection onto a pattern and
@@ -56,8 +56,9 @@ Every requirement below serves one or more of these.
   cannot be vectorized are compiled (Numba).
 - **PERF-8 (MUST)** Work is distributed to a pool of
   `ops.compute_workers` processes. A worker takes a whole day, reads
-  that day's files once, and processes every entity in it, so the number
-  of file opens is proportional to days, not to entity-days.
+  that day's rows once, and processes every entity in it, so the number
+  of reads is proportional to days, not to entity-days. A month's output
+  is committed in one transaction.
 - **PERF-9 (MUST)** No transformation iterates over rows in interpreted
   Python. Per-row logic is expressed as columnar operations, SQL, or
   compiled kernels.
@@ -70,9 +71,9 @@ Every requirement below serves one or more of these.
   joins spill to fast storage instead of failing.
 - **PERF-12 (MUST)** Work is incremental. Only stale partitions are
   recomputed (`ARC-52`).
-- **PERF-13 (SHOULD)** Each component records its throughput (entity-days
-  per second) in `meta.task_run`, so a slowdown is visible the day it
-  appears.
+- **PERF-13 (SHOULD)** Each component reports its throughput (entity-days
+  per second) with every materialization, so a slowdown is visible the
+  day it appears.
 
 ## 4. The serving database
 
@@ -149,9 +150,10 @@ Every requirement below serves one or more of these.
 
 ## 5. Publishing
 
-- **PERF-30 (MUST)** Data moves from Parquet to PostgreSQL in binary form
-  through the bulk-load protocol, in columnar batches, with no text
-  serialization and no per-row statements.
+- **PERF-30 (MUST)** Data moves from the lake to PostgreSQL in binary form
+  through the bulk-load protocol, in columnar batches, read at the
+  release's snapshot, with no text serialization and no per-row
+  statements.
 - **PERF-31 (MUST)** A partition is published by building it aside and
   swapping it in:
   1. Create a standalone table with the parent's structure.
@@ -195,11 +197,11 @@ that, a budget is a requirement.
 | Query: stop events of one route on one day | 1 s |
 | Query: position of each of 1,000 taps at tap time | 1 s |
 | Query: passenger boardings by route and hour for one month | 5 s |
-| Query: the same for one year, from the summary table | 2 s |
+| Query in the lake: the same for one year | 10 s |
 
 - **PERF-41 (MUST)** `opa bench` runs the reference operations and
-  queries against a fixed month and stores the timings in `meta`. It runs
-  before every release.
+  queries against a fixed month and stores the timings in
+  `meta.benchmark`. It runs as part of the release gate (`DQ-26`).
 - **PERF-42 (MUST)** A release whose benchmark exceeds a budget by more
   than 20% is not published until the regression is explained or the
   budget is revised by pull request.
@@ -217,4 +219,4 @@ form of each pattern. The essentials:
 | W4 | Range join with entity equality | `during && range` with entity equality |
 | W5 | Spatial functions on prepared geometry | Use stored progress and stop columns; fall back to PostGIS on the dimension geometry |
 | W7 | Merge join on shared key and order | Join on identifier plus partition date inside a family |
-| W8 | Scan of the needed columns over the month partitions | Summary tables first; facts with partition pruning otherwise |
+| W8 | Scan of the needed columns over the month partitions | Facts with partition pruning; for whole years, prefer the lake |

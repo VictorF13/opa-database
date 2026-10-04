@@ -170,9 +170,11 @@ every release, so `develop` always contains everything that `main` does.
 | `test` | `uv run pytest` with coverage |
 | `integration` | Integration and end-to-end tests against a PostgreSQL and PostGIS service |
 | `database` | All migrations on an empty database, schema snapshot comparison, roles applied, access verified |
-| `docs` | markdownlint, link check, reference data validation |
+| `sql` | `uv run sqlfluff lint dbt` |
+| `dbt` | The dbt project parses, its unit tests pass, every description is present, and the orchestrator's definitions load |
+| `docs` | markdownlint, link check, dbt documentation build |
 | `lock` | `uv lock --check`, and generated requirement files are current |
-| `build` | `uv build` for every package |
+| `build` | `uv build`, and the container image builds |
 
 - **DLV-31 (MUST)** Every job in `DLV-30` is a required status check.
 - **DLV-32 (MUST)** Workflow hygiene: third-party actions are pinned by
@@ -224,7 +226,9 @@ published data, and records which code release produced it.
      `chore: release <version>`;
   4. creates the tag `v<version>` on the release commit;
   5. publishes a GitHub Release for the tag with the same notes;
-  6. builds the packages from the tag with `uv build` and attaches them;
+  6. builds the package and the container image from the tag, attaches
+     the package to the release, and publishes the image to the
+     container registry;
   7. brings `main` back into `develop` (`DLV-46`).
 - **DLV-44 (MUST)** The version is stored in the repository
   (`ENG-17`) and `CHANGELOG.md` follows the Keep a Changelog format.
@@ -253,15 +257,16 @@ reachable only over a private network, so deployment is pulled by the
 host, never pushed by continuous integration.
 
 - **DLV-50 (MUST)** `opa ops deploy <version>` performs a deployment:
-  check out the tag; `uv sync --locked --no-dev`; apply database
-  migrations; apply roles and verify access; restart the application
-  services; run smoke checks; record the deployment in
-  `meta.deployment`.
+  pull the release's container image and pin it by digest; apply the
+  serving database's migrations; apply roles and verify access; restart
+  the project's services on the new image; run smoke checks; record the
+  deployment in `ops`.
 - **DLV-51 (MUST)** The host runs only tagged releases. A timer notices a
   new release and notifies the operator; the operator runs the
   deployment.
 - **DLV-52 (MUST)** Deploying code never rebuilds or republishes data on
-  its own. Data changes only through builds and releases.
+  its own. Data changes only through orchestrator runs and data
+  releases.
 - **DLV-53 (MUST)** Rollback is deploying the previous version. Database
   migrations follow expand-then-contract (`ENG-51`) so the previous
   version runs against the current schema.
@@ -290,9 +295,9 @@ host, never pushed by continuous integration.
    release pull request into `main`, with the next minor version in its
    title and the change in its description.
 5. Merging the release pull request produces a release commit on
-   `main` with the new version and changelog section, a tag on it, and a
-   GitHub Release with built packages. Afterwards `develop` and `main`
-   point at the same commit.
+   `main` with the new version and changelog section, a tag on it, a
+   GitHub Release with the built package, and a published image.
+   Afterwards `develop` and `main` point at the same commit.
 6. A release made while `develop` moved ends with `main` merged into
    `develop`, or with a sync pull request and an alert.
 7. `opa ops deploy` installs that release on the host and records it.

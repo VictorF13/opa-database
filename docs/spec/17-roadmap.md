@@ -27,7 +27,7 @@ A phase is done when:
 | Phase | Name | Size | Depends on |
 | --- | --- | --- | --- |
 | P0 | Repository and delivery foundation | M | |
-| P1 | Platform | M | P0 |
+| P1 | Platform and stack validation | L | P0 |
 | P2 | Raw store and inventory | S | P1 |
 | P3 | Bronze | M | P2 |
 | P4 | Silver and reference data | L | P3 |
@@ -45,14 +45,15 @@ Sizes are relative (S, M, L, XL), not dates.
 **Goal:** a repository in which every later change is automatically held
 to the standard.
 
-Deliverables: the uv workspace and four package skeletons; Ruff, ty,
-pytest, and prek configured as specified; the continuous integration
+Deliverables: the Python package and dbt project skeletons; Ruff, ty,
+pytest, prek, and SQLFluff configured as specified; the orchestrator
+definitions skeleton; the container image; the continuous integration
 workflow; branch rulesets and repository settings; pull request and issue
 templates; community files; release automation; the documentation
 skeleton with the first decision records; the skeleton of the synthetic
 world generator; `CLAUDE.md`.
 
-Covers: `ENG-1` to `ENG-59`, `DLV-1` to `DLV-61` except deployment.
+Covers: `ENG-*`, `DLV-1` to `DLV-61` except deployment.
 
 Acceptance:
 
@@ -61,19 +62,41 @@ Acceptance:
 - Acceptance items 1 to 5 of [14-delivery.md](14-delivery.md) are
   demonstrated with a trivial change.
 
-### P1. Platform
+### P1. Platform and stack validation
 
-**Goal:** a database instance and storage layout that are fast, safe, and
-defined entirely in the repository.
+**Goal:** a platform that is fast, safe, and defined entirely in the
+repository, and proof that the chosen tools work together as this
+specification assumes.
 
 Deliverables: tier configuration and preflight; the compose file and
-PostgreSQL configuration; migrations for `meta`, `ref`, `labels`,
-`feedback`, and schemas; roles, grants, and access verification; backups,
-restore test, and health check with timers; `opa ops` commands; the
-evaluation of `pg_duckdb` (`PLT-24`); the platform runbooks.
+PostgreSQL configuration; the three databases; the lake and its catalog;
+the orchestrator services; migrations for the serving database; roles,
+grants, and access verification; backups, restore test, and health check
+with timers; `opa ops` commands; the platform runbooks; the stack
+validation below.
 
-Covers: `PLT-*`, `SEC-1` to `SEC-13`, `SEC-30` to `SEC-52`, `BKP-*`,
-`OPS-30` to `OPS-35`, `COX-*`.
+Covers: `PLT-*`, `ARC-10` to `ARC-19`, `SEC-*` except privacy of data not
+yet loaded, `BKP-*`, `OPS-20` to `OPS-35`, `COX-*`.
+
+**Stack validation.** On the synthetic world, each of these is shown to
+work and is kept as an automated test:
+
+1. A time-batched incremental dbt model replaces one batch of a lake
+   table in a single transaction, and rerunning it changes nothing.
+2. Two processes write different lake tables at the same time.
+3. A snapshot recorded as a release reads back identically after later
+   writes, after lake maintenance, and after a catalog restore.
+4. Declared partitioning and sort order make a one-device, one-day read
+   meet its budget (`PERF-40`) on a table of realistic size.
+5. The orchestrator materializes partitioned dbt models and Python
+   assets in dependency order, rematerializes a month when its upstream
+   changes, and blocks downstream work when a check fails.
+6. A full backup and restore of the catalog and data files round-trips.
+
+If a point fails and cannot be fixed with the tools' supported features,
+the fallback for that capability is recorded as a decision record before
+P3 starts. For the table format the fallback is partitioned Parquet
+written by dbt with a release manifest in `meta` (`ARC-10`).
 
 Acceptance:
 
@@ -82,16 +105,16 @@ Acceptance:
   [12-backup-and-recovery.md](12-backup-and-recovery.md).
 - Acceptance items 1 to 4 of
   [11-access-and-security.md](11-access-and-security.md).
-- `opa ops status` reports each production-readiness criterion.
+- All six validation points pass, or have a recorded fallback.
 
 ### P2. Raw store and inventory
 
 **Goal:** know exactly what raw data exists, and hold a verified mirror
 of what the reference month needs.
 
-Deliverables: `opa raw inventory`, `fetch`, `verify`; the manifest; path
-rules with tests; the raw inventory report (years per source, sizes,
-layouts, anomalies) in `docs/reference/`.
+Deliverables: the inventory, fetch, and verification assets; the
+manifest; path rules with tests; the raw inventory report (years per
+source, sizes, layouts, anomalies) in `docs/reference/`.
 
 Covers: `RAW-*`, `REF-12`.
 
@@ -108,8 +131,8 @@ Acceptance:
 **Goal:** a lossless, queryable copy of every raw file of the reference
 month and its neighbors.
 
-Deliverables: every bronze dataset; quarantine; coverage index; drift
-events; `opa bronze` commands.
+Deliverables: every bronze table; quarantine; ingest records; drift
+events.
 
 Covers: `BRZ-*`, `DQ-1` to `DQ-3`, accounting invariant A1.
 
@@ -120,10 +143,10 @@ Acceptance: acceptance of [04-raw-and-bronze.md](04-raw-and-bronze.md).
 **Goal:** typed, clean, conformed tables and the curated reference data
 they need, with every profile fact re-measured.
 
-Deliverables: all silver tables and contracts; rejects; quality flags;
-reference tables, vocabularies, and the parameter registry; sentinel and
-code tables from profiling; the profile report that confirms or corrects
-each **Profile** statement of this specification.
+Deliverables: all silver models with contracts and tests; rejects;
+quality flags; reference seeds, vocabularies, and the parameter registry;
+sentinel and code tables from profiling; the profile report that confirms
+or corrects each **Profile** statement of this specification.
 
 Covers: `SLV-*`, `REF-*`, accounting invariant A2, `DQ-12` to `DQ-16`.
 
@@ -132,7 +155,7 @@ Acceptance:
 - Acceptance of [05-silver.md](05-silver.md) and
   [06-reference-data.md](06-reference-data.md).
 - Every profile fact is confirmed or corrected in the specification, and
-  every parameter marked "P0" or "P4" has its measured basis.
+  every parameter marked "P4" has its measured basis.
 
 ### P5. Tracks, patterns, and segmentation
 
@@ -140,9 +163,11 @@ Acceptance:
 correct set of schedule patterns.
 
 Deliverables: track preparation; device profiles; zone validation
-report; schedule patterns; activity segmentation, runs, and blocks; a
-minimal labeling application with the timeline annotation and link
-review queues; the first annotated bus-days; segmentation evaluation.
+report; schedule patterns; activity segmentation with its baseline
+method, runs, and blocks; a minimal labeling application with the
+timeline annotation and link review queues; the first annotated
+bus-days; segmentation evaluation; the full method if the evaluation
+calls for it (`INF-6`).
 
 Covers: `INF-1` to `INF-29`, `APP-1` to `APP-6`, `APP-12` (two queues),
 `APP-20` to `APP-26`, accounting invariants A7 to A9.
@@ -160,9 +185,10 @@ Acceptance:
 
 **Goal:** every bus-day linked to a device, or explained.
 
-Deliverables: candidate generation; every evidence family; scoring,
-daily assignment, and consolidation; unlinked reports; tap-derived
-tracks; linkage evaluation.
+Deliverables: candidate generation; the tap-position method; daily
+assignment and consolidation; unlinked reports; tap-derived tracks;
+linkage evaluation; the combined-evidence method for whatever the
+tap-position method cannot settle (`INF-33`).
 
 Covers: `INF-30` to `INF-39`, `INF-50` to `INF-52`.
 
@@ -183,7 +209,7 @@ every run timed or explained.
 Deliverables: reconciliation with statuses, classes, flags, and
 corrections; boarding assignment, positions, and boarding stops; stop
 events; learned pattern proposals; rule exception proposals; incident
-candidates; fare code profile; both passes of a build.
+candidates; fare code profile; both passes for a month.
 
 Covers: `INF-40` to `INF-42`, `INF-60` to `INF-99`, accounting
 invariants A5, A6, A10, A12.
@@ -201,12 +227,12 @@ Acceptance:
 **Goal:** milestone M1. The reference month is published as the first
 release.
 
-Deliverables: gold dimensions, facts, summaries, and views; all
-accounting invariants and checks; lineage command; builds, releases,
-gates, release notes; publishing with swap and access verification;
-benchmark suite; data dictionary; query guide.
+Deliverables: gold dimensions, facts, and views; all accounting
+invariants and checks; the lineage command; releases, the release gate,
+release notes; publishing with swap and access verification; benchmark
+suite; generated data dictionary; query guide.
 
-Covers: `GLD-*`, `DQ-*`, `PERF-*`, `OPS-1` to `OPS-14`.
+Covers: `GLD-*`, `DQ-*`, `PERF-*`, `OPS-1` to `OPS-15`.
 
 Acceptance (M1):
 
@@ -214,11 +240,11 @@ Acceptance (M1):
   [09-quality-and-lineage.md](09-quality-and-lineage.md), and
   [15-operations.md](15-operations.md).
 - Every invariant of `DQ-10` holds for the reference month.
-- Every gate of `INF-95` passes; the release is created, gated, and
+- The release gate (`DQ-26`) passes; the release is created, gated, and
   published by command.
-- `opa bench` meets the budgets of `PERF-40`, or the budgets are revised
-  with measurements.
-- The whole month is rebuilt from raw files on a scratch lake and
+- The benchmark meets the budgets of `PERF-40`, or the budgets are
+  revised with measurements.
+- The whole month is rebuilt from raw files into an empty lake and
   produces identical content.
 
 ### P9. Applications and the improvement loop
@@ -266,8 +292,8 @@ The riskiest assumptions are tested first:
 
 | Assumption | Tested in | If false |
 | --- | --- | --- |
-| The remote store holds complete raw data for the reference month | P2 | Choose another reference month |
-| Tap coordinates identify the device for most of the fleet | P4 (profile), P6 | Linkage relies more on the other evidence families |
-| Segmentation meets its gates with schedule patterns alone | P5 | Bring learned patterns forward from P7 |
+| The table format, dbt, and the orchestrator work together as specified | P1 | The recorded fallback for the failing capability |
 | The reference host meets the budgets | P1, P8 | Revise budgets or the published window |
-| `pg_duckdb` works on the chosen image | P1 | Use the DuckDB catalog (`OPS-14`) |
+| The remote store holds complete raw data for the reference month | P2 | Choose another reference month |
+| Tap coordinates identify the device for most of the fleet | P4 (profile), P6 | The combined-evidence method carries more of the fleet |
+| Simple segmentation rules meet the gates | P5 | The full decoding method, already specified |

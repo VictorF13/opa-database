@@ -30,7 +30,8 @@ the whole family of problems listed in
 ## 2. Common rules
 
 - **INF-1 (MUST)** A component reads only silver, reference data, labels,
-  released models, and outputs of earlier components in the same build.
+  released models, and outputs of earlier components for the same
+  month.
 - **INF-2 (MUST)** Every inferred row carries a `method` and, where it is
   an estimate, a `confidence` between 0 and 1. Decisions that combine
   several kinds of evidence also carry an evidence summary that shows
@@ -41,16 +42,26 @@ the whole family of problems listed in
 - **INF-4 (MUST)** Inference never overwrites a source value. A correction
   is a new column next to the original, with the reason for it (`PR-3`).
 - **INF-5 (MUST)** Components are deterministic (`ARC-50`).
-- **INF-6 (MUST)** Each component has a transparent baseline: rules or
-  additive scoring that a person can read and argue with. A learned model
-  replaces a baseline only when it beats it on the frozen test set by more
-  than `gate.model_min_gain` (default 1 percentage point on the gated
-  metric) and still reports per-row evidence.
+- **INF-6 (MUST)** Each component is specified with two methods. The
+  **baseline method** is the simplest one that can work: rules or a
+  direct join that a person can read and argue with. The **full method**
+  is the complete treatment of the problem. A component starts on its
+  baseline. It adopts the full method when the baseline fails a gate of
+  section 16, or leaves more than `method.max_unresolved_frac` of its
+  cases unresolved. The full method is then applied to the cases the
+  baseline cannot settle, and the baseline stays as a cross-check. A
+  learned model replaces a transparent method only when it beats it on
+  the frozen test set by more than `gate.model_min_gain` and still
+  reports per-row evidence.
 - **INF-7 (MUST)** Every threshold is a parameter (`REF-20`).
 - **INF-8 (MUST)** Each component writes summary metrics to `meta` on
-  every build: coverage, counts per category and per reason code, and
+  every materialization: coverage, counts per category and per reason code, and
   confidence distribution. These feed drift monitoring (`DQ-30`).
 - **INF-9 (MUST)** Units of work are entity-days (`ARC-8`, `ARC-34`).
+  Steps that are set-based (candidate search, co-location, interval
+  reconciliation, tap assignment, profiles) are dbt models. Steps that
+  walk a track in order (preparation, segmentation, stop events) are
+  Python (`ARC-18`).
 
 ## 3. Components and order
 
@@ -204,24 +215,20 @@ direction, an ordered list of stops, and a line geometry.
 | `moving_unclassified` | Moving, matched to no pattern, not explained as deadhead |
 | `gap` | No valid pings for longer than `track.max_gap_s` |
 
-- **INF-23 (MUST)** Baseline method:
+- **INF-23 (MUST)** Baseline method, by rules:
   1. **Anchors.** Maximal stretches inside a zone that last at least
      `track.zone_dwell_min_s` become `garage` or `terminal_layover`.
   2. **Candidates.** For each stretch between anchors, the candidate
-     patterns are those in effect that day for (a) the routes named by
-     the device's own `route_id` values in the stretch, (b) once linkage
-     exists, the routes on the linked bus's trip records that overlap
-     the stretch, and (c) the patterns with the greatest spatial overlap
-     with the stretch, found by grid signature (`PERF-10`).
-  3. **Decoding.** A hidden Markov model whose states are the candidate
-     patterns plus "off pattern". Emission probability comes from the
-     cross-track distance to the pattern (`match.cross_track_sigma_m`)
-     and, above `match.heading_min_speed_kmh`, from agreement between
-     `heading_deg` and the pattern's local bearing. Transitions keep
-     progress non-decreasing, keep the advance consistent with elapsed
-     time and with the odometer difference, and penalize switching
-     patterns. The most likely state sequence is found with the Viterbi
-     algorithm.
+     patterns are those in effect that day for the routes named by the
+     device's own `route_id` values in the stretch and, once linkage
+     exists, for the routes on the linked bus's trip records that overlap
+     the stretch.
+  3. **Matching.** A ping is on a candidate pattern when it lies within
+     `match.off_pattern_m` of it and, above
+     `match.heading_min_speed_kmh`, its heading agrees with the
+     pattern's local bearing within `match.heading_tolerance_deg`. A
+     stretch is assigned to the candidate on which the most pings match
+     with progress that does not decrease.
   4. **Runs.** A maximal `on_pattern` stretch that advances at least
      `run.min_length_m` and passes at least `run.min_stops` stops is a
      run. Shorter stretches become `moving_unclassified`. Stops and slow
@@ -230,9 +237,18 @@ direction, an ordered list of stops, and a line geometry.
      another zone become `deadhead`; other moving stretches become
      `moving_unclassified`; stationary stretches become `stopped`.
   6. **Blocks.** A block runs from leaving a garage to returning to one.
-- **INF-24 (MAY)** An implementation may simplify step 3 (for example by
-  scoring whole stretches per candidate) provided the gates in section
-  16 are met.
+- **INF-24 (MUST)** Full method, by decoding. Candidates are widened with
+  the patterns of greatest spatial overlap with the stretch, found by
+  grid signature (`PERF-10`), and step 3 is replaced by a hidden Markov
+  model whose states are the candidate patterns plus "off pattern".
+  Emission probability comes from the cross-track distance to the
+  pattern (`match.cross_track_sigma_m`) and from heading agreement.
+  Transitions keep progress non-decreasing, keep the advance consistent
+  with elapsed time and with the odometer difference, and penalize
+  switching patterns. The most likely state sequence is found with the
+  Viterbi algorithm. It handles what rules cannot: devices that report
+  no route or the wrong one, overlapping routes on shared streets, and
+  noisy stretches.
 - **INF-25 (MUST)** A run records: device, bus when linked, operational
   date, pattern, route, direction, start and end time, first and last
   stop position reached, coverage (share of the pattern's length
@@ -290,12 +306,20 @@ direction, an ordered list of stops, and a line geometry.
   Profile: tap position is close to decisive where it applies (the true
   device coincides with the tap; the best rival is kilometers away) and
   applies to about 91% of buses. The other families exist for the rest.
-- **INF-33 (MUST)** Baseline scoring is additive: each family
-  contributes a log-likelihood ratio, and the sum is the pair's score
-  for the day (probabilistic record linkage in the Fellegi-Sunter
-  sense). The ratios are estimated from the data, starting from pairs
-  established by tap position, and are calibrated to probabilities on
-  labeled pairs.
+- **INF-33 (MUST)** Scoring a candidate pair for a day:
+  1. **Baseline method, by tap position.** For a bus-day with at least
+     `link.min_taps` geotagged taps, the device with the largest share
+     of matched taps is chosen when that share and its margin over the
+     next device are clear and no tap contradicts it. Its confidence
+     comes from those two numbers, calibrated on labeled pairs.
+     Dictionary claims and continuity only break ties.
+  2. **Full method, by combined evidence.** For bus-days the baseline
+     cannot settle (too few geotagged taps, no clear winner,
+     contradictions), every family of `INF-32` contributes a
+     log-likelihood ratio and the sum is the pair's score (probabilistic
+     record linkage in the Fellegi-Sunter sense). The ratios are
+     estimated from the data, starting from the pairs the baseline
+     established, and calibrated to probabilities on labeled pairs.
 - **INF-34 (MUST)** Daily assignment is solved jointly for all buses and
   devices of the day as a minimum-cost matching in which every bus also
   has a "none" option. A device is assigned to at most one bus per day
@@ -475,7 +499,7 @@ direction, an ordered list of stops, and a line geometry.
 | Unscheduled service | Repeated `moving_unclassified` paths with passenger taps | A pattern with no schedule counterpart |
 
 - **INF-41 (MUST)** Accepted patterns have `source = observed` and take
-  part in segmentation from the next build on.
+  part in segmentation from the next materialization on.
 - **INF-42 (MUST)** Schedule-derived patterns are never altered. A
   correction is a separate pattern that points to the one it corrects.
 
@@ -491,16 +515,17 @@ direction, an ordered list of stops, and a line geometry.
   bus-days, stratified by company, route type (radial, circular,
   segmented), and day type, before milestone M1 is declared.
 - **INF-93 (MUST)** Independent checks that need no labels are computed
-  on every build:
+  for every month materialized:
   - share of passenger taps that fall inside an observed dwell at their
     inferred boarding stop;
   - agreement between odometer difference and pattern distance on runs;
   - error when each ping near a stop is held out and its time is
     predicted from its neighbors;
   - run duration against the scheduled running time for the hour.
-- **INF-94 (MUST)** `opa infer eval` computes every metric for a build and
-  stores the results in `meta.evaluation`.
-- **INF-95 (MUST)** A build may be released only if it passes these
+- **INF-94 (MUST)** An evaluation asset computes every metric for each
+  month and stores the results in `meta.evaluation`. The release gate
+  reads them at the release's snapshot (`DQ-26`).
+- **INF-95 (MUST)** A release is published only if it passes these
   gates. Thresholds are parameters (`gate.*`), initial values to be
   confirmed at M1:
 
@@ -525,13 +550,13 @@ direction, an ordered list of stops, and a line geometry.
 
 ## 17. Passes and learning over time
 
-- **INF-98 (MUST)** A build runs in two passes. Pass 1 runs A to G with
-  schedule patterns and accepted observed patterns. Pass 2 repeats
+- **INF-98 (MUST)** Inference for a month runs in two passes. Pass 1 runs
+  A to G with schedule patterns and accepted observed patterns. Pass 2 repeats
   segmentation with the linked bus's trip records as extra candidates,
-  then reconciliation, boardings, and stop events. A build reports the
-  share of runs whose pattern changed between passes.
-- **INF-99 (MUST)** Learning across builds happens only through explicit,
+  then reconciliation, boardings, and stop events. Each materialization
+  reports the share of runs whose pattern changed between passes.
+- **INF-99 (MUST)** Learning over time happens only through explicit,
   reviewable inputs: accepted pattern proposals, accepted rule
   exceptions, reviewed code meanings, new labels, and released models.
   Nothing learned is applied silently, and every such input is versioned
-  and recorded on the build that used it.
+  and recorded on every materialization that used it.

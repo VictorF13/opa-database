@@ -63,8 +63,8 @@ They enter the system as files, through the label import contract
   wherever they are, over a read-only connection, into import files.
   The export records, for each judgment, how it was made as far as is
   known.
-- **COX-9 (MUST)** The import files are stored in the lake's exports
-  area, included in backups as class A, and loaded with
+- **COX-9 (MUST)** The import files are stored in the exports area of the
+  BULK tier, included in backups as class A, and loaded with
   `opa labels import`. From then on the system depends only on its own
   `labels` schema.
 - **COX-10 (MUST)** Imported judgments are evidence to evaluate against,

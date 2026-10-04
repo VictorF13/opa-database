@@ -11,22 +11,28 @@ and it does not decide which records are true.
 ## 1. Rules
 
 - **SLV-1 (MUST)** Silver has one table per source entity (section 3).
+  Each is a dbt model that reads bronze and reference data only.
 - **SLV-2 (MUST)** Event tables are partitioned by the date on which the
   event happened, not by delivery date. Snapshot tables (schedule,
   dictionaries) are partitioned by snapshot date.
-- **SLV-3 (MUST)** The unit of build is one partition of one table. Its
-  inputs are all bronze files that the coverage index (`BRZ-9`) lists for
-  that partition. The partition is written as a single file and replaced
-  atomically (`ARC-12`).
-- **SLV-4 (MUST)** A partition is rebuilt when any contributing bronze
-  file, the transform version, the relevant parameters, or the relevant
-  reference data change (`ARC-52`). A newly arrived raw file that covers
-  an already built date makes that date stale (`ARC-55`).
-- **SLV-5 (MUST)** Every table has a schema contract: column names,
-  types, nullability, allowed ranges, and the primary key. The contract is
-  a Pandera schema in code, validated on every build.
-- **SLV-6 (MUST)** Every bronze row has exactly one disposition, recorded
-  per partition in `meta.silver_partition`:
+- **SLV-3 (MUST)** Event tables are built incrementally in time batches,
+  using dbt's batch-by-event-time incremental strategy. A batch is built
+  from every bronze row whose `_event_date` falls in it, whatever file
+  delivered the row, and replaces the same batch of the silver table in
+  one transaction (`ARC-12`).
+- **SLV-4 (MUST)** A month of a silver table is rebuilt when any bronze
+  month that can contribute rows to it is updated, or when its model,
+  the parameters, or the reference data change (`ARC-52`). The bronze
+  months that can contribute are declared per source: the same month and
+  the one before for pings; the same month and the following
+  `ingest.afc_late_months` for fare records (`ARC-55`). A row that
+  arrives later than the declared window is caught by accounting
+  (`SLV-6`) and fails the build until the window is widened.
+- **SLV-5 (MUST)** Every table has an enforced dbt model contract (column
+  names, types, nullability) and data tests for its primary key, value
+  ranges, and accepted values. Tests run on every build of a batch.
+- **SLV-6 (MUST)** Every bronze row has exactly one disposition, and a
+  dbt test proves it per event date:
 
   ```text
   bronze rows = silver rows + rejected rows + duplicate rows
@@ -34,20 +40,22 @@ and it does not decide which records are true.
 
   - A **silver row** may carry quality flags.
   - A **rejected row** could not be given a primary key or an event time
-    (for example an unparseable timestamp). It is written to
-    `silver/_rejects/<table>/` with a reason code.
-  - A **duplicate row** repeats a row already kept (`SLV-12`). It is
-    counted, and listed in `silver/_rejects/` with the reason `duplicate`
-    and a pointer to the kept row.
+    (for example an unparseable timestamp, and therefore no
+    `_event_date`). It is a row of `silver.<table>_rejects` with a reason
+    code.
+  - A **duplicate row** repeats a row already kept (`SLV-12`). It is a
+    row of the same rejects table with the reason `duplicate` and a
+    pointer to the kept row.
 - **SLV-7 (MUST)** Every silver row keeps `_file_id` and `_row`, so the
   original text is one lookup away.
-- **SLV-8 (MUST)** Keys are canonicalized as in `ARC-25`, and the source
-  value is kept beside the canonical one.
+- **SLV-8 (MUST)** Keys are canonicalized as in `ARC-25`, by shared dbt
+  macros, and the source value is kept beside the canonical one.
 - **SLV-9 (MUST)** Instants are UTC timestamps. Naive local timestamps are
   localized to `America/Fortaleza` and converted. The three date columns
   of `ARC-30` are added to every event table.
 - **SLV-10 (MUST)** Known sentinel values are replaced by null and a
-  quality flag is set. Sentinels are data (`ref.sentinel`), not code.
+  quality flag is set. Sentinels are reference data (`ref.sentinel`), not
+  literals in models.
 - **SLV-11 (MUST)** Each event table has a `quality_flags` integer whose
   bits are defined in `ref.quality_flag`. A flag describes the row; it
   never removes the row.
@@ -66,10 +74,11 @@ and it does not decide which records are true.
   `out_of_area`. An invalid coordinate becomes null and is flagged.
 - **SLV-16 (MUST)** Silver does not join one source to another and does
   not use labels or models.
-- **SLV-17 (MUST)** Primary keys are unique. A violation fails the build
-  of that partition.
-- **SLV-18 (MUST)** Within a partition, rows are sorted as section 3
-  states, so that one entity's rows are contiguous (`PERF-2`).
+- **SLV-17 (MUST)** Primary keys are unique. The lake does not enforce
+  keys, so uniqueness is a dbt test, and a violation fails the build.
+- **SLV-18 (MUST)** Tables declare their physical partitioning and sort
+  order as section 3 states, so that one entity's rows are contiguous
+  (`PERF-2`).
 
 ## 2. Partitioning and time
 
@@ -97,8 +106,8 @@ One row per GPS ping.
 | `vehicle_id` | big integer | The AVL system's internal vehicle identifier |
 | `latitude`, `longitude` | double precision | Null when invalid |
 | `heading_deg` | small integer | Source field `direction`, 0 to 359; null when out of range |
-| `speed` | small integer | Unit recorded in the data dictionary after P0 |
-| `odometer` | big integer | Unit recorded in the data dictionary after P0 |
+| `speed` | small integer | Unit recorded in the data dictionary after profiling |
+| `odometer` | big integer | Unit recorded in the data dictionary after profiling |
 | `route_code` | integer | Null when the source value is 0 (unset) |
 | `route_id` | text | Canonical form of `route_code` |
 | `event_date`, `local_date`, `operational_date` | date | `ARC-30` |
@@ -188,11 +197,15 @@ One row per fare tap (`Passageiro`).
   In columnar storage the repetition costs almost nothing, and it removes
   a join from the most common queries. The trip-level table remains the
   place where trip attributes are authoritative.
-- **SLV-32 (MUST)** Placeholder card and event values are data
-  (`ref.sentinel`), established by profiling, not guessed in code.
+- **SLV-32 (MUST)** Placeholder card and event values are reference data
+  (`ref.sentinel`), established by profiling, not guessed in models.
 - **SLV-33 (MUST)** Source elements that are neither trips nor taps
-  (`BRZ-7`) are published as `afc_unmapped_elements` so that they are
+  (`BRZ-7`) are exposed as `afc_unmapped_elements` so that they are
   visible and counted.
+- **SLV-34 (MUST)** `card_key` is computed in the silver model by a keyed
+  hash function made available to the query engine. The key is read from
+  the secrets store at run time and never appears in SQL text, compiled
+  models, or logs (`SEC-22`).
 
 ### 3.4 `gtfs_*`
 
@@ -207,15 +220,15 @@ validation summary, substituted members).
 - **SLV-42 (MUST)** `gtfs_trips` gains a `direction` column (`I`, `V`, or
   null) derived from `direction_id` when present, otherwise from the
   shape identifier through `ref.gtfs_direction_rule`.
-- **SLV-43 (MUST)** Each table enforces its natural key within a feed:
-  `(trip_id, stop_sequence)` for stop times, `(shape_id,
+- **SLV-43 (MUST)** Each table has tests for its natural key within a
+  feed: `(trip_id, stop_sequence)` for stop times, `(shape_id,
   shape_pt_sequence)` for shapes, `stop_id`, `trip_id`, `route_id`, and
-  so on. Violations are flagged and reported; rows are not dropped.
+  so on. These tests warn and set flags; rows are not dropped.
 - **SLV-44 (MUST)** When an export lacks a required member, silver fills
   that table from the nearest export that has it (the earlier one on a
   tie), sets `substituted_from_feed_date` on every such row, and lists
   the member in `gtfs_feeds`. A substitution is never silent.
-- **SLV-45 (MUST)** Referential checks between GTFS tables (trips to
+- **SLV-45 (MUST)** Referential tests between GTFS tables (trips to
   routes, shapes, and services; stop times to trips and stops) run on
   every feed. Results are stored per feed and set flags on the offending
   rows.
@@ -247,9 +260,10 @@ an AVL vehicle or device.
 
 ## 4. Publication
 
-- **SLV-60 (MUST)** Silver tables are published to the `silver` schema for
-  the configured window (`PLT-50`) with the same names and columns, plus a
-  generated point geometry where a table has coordinates.
+- **SLV-60 (MUST)** Silver tables are published to the `silver` schema of
+  the serving database for the configured window (`PLT-50`) with the same
+  names and columns, plus a generated point geometry where a table has
+  coordinates.
 - **SLV-61 (MUST)** `card_id` is readable only through the restricted
   role (`SEC-20`). Every other role sees `card_key`.
 
@@ -257,8 +271,8 @@ an AVL vehicle or device.
 
 Silver is accepted for a period when:
 
-1. `SLV-6` holds for every partition, and totals reconcile with bronze.
-2. Every contract validates and every primary key is unique.
-3. A rebuild changes no output bytes.
+1. `SLV-6` holds for every event date, and totals reconcile with bronze.
+2. Every contract is enforced and every test passes.
+3. A rebuild changes no row.
 4. The reject and flag reports have been reviewed, and every reject
    reason and flag that occurs is documented in the data dictionary.

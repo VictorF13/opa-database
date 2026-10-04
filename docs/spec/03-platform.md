@@ -1,8 +1,9 @@
 # 03. Platform
 
-This document specifies the host, storage, containers, and database
-configuration. Everything here is expressed as files in the repository
-under `deploy/`, so the platform is reproducible and reviewable.
+This document specifies the host, storage, containers, the database
+instance, and the orchestrator deployment. Everything here is expressed
+as files in the repository under `deploy/`, so the platform is
+reproducible and reviewable.
 
 ## 1. Reference host
 
@@ -29,9 +30,18 @@ deployment decision, recorded in the runbook.
 
 | Tier | Variable | Holds | Wants |
 | --- | --- | --- | --- |
-| FAST | `OPA_FAST_ROOT` | PostgreSQL data directory; DuckDB temporary files | Solid-state, low latency |
-| BULK | `OPA_BULK_ROOT` | Raw mirror, the lake, model artifacts | Capacity; sequential throughput |
+| FAST | `OPA_FAST_ROOT` | PostgreSQL data directory; temporary files of query engines | Solid-state, low latency |
+| BULK | `OPA_BULK_ROOT` | Raw mirror, the lake's data files, model artifacts, exports | Capacity; sequential throughput |
 | BACKUP | `OPA_BACKUP_ROOT` | Backup repository | A different physical device from the data it protects |
+
+```text
+${OPA_BULK_ROOT}/
+  raw/files/<source>/<original relative path>     immutable mirror
+  raw/versions/<file_id>/<file name>              superseded contents
+  lake/                                           data files of the lake
+  models/<component>/<version>/                   released model artifacts
+  exports/<kind>/<timestamp>/                     snapshots of app state
+```
 
 - **PLT-3 (MUST)** FAST is on solid-state storage.
 - **PLT-4 (MUST)** A preflight command (`opa ops preflight`) reports, for
@@ -47,8 +57,8 @@ deployment decision, recorded in the runbook.
   BACKUP, they are mirrored (ZFS mirror or RAID 1). Capacity is added by
   growing the tier, not by scattering paths.
 - **PLT-8 (MUST)** Free space on every tier is checked before each
-  pipeline run and each backup. A run that would exceed
-  `ops.min_free_fraction` (default 10% free) refuses to start.
+  pipeline run and each backup. A run that would leave less than
+  `ops.min_free_fraction` (default 10%) free refuses to start.
 - **PLT-9 (SHOULD)** Disk health is monitored (SMART) and reported by the
   health check (`OPS-31`).
 
@@ -58,10 +68,13 @@ Services run under Docker Compose from `deploy/compose.yaml`.
 
 | Service | Purpose |
 | --- | --- |
-| `postgres` | PostgreSQL with PostGIS |
-| `sqlweb` | A web SQL client for people without a local client |
+| `postgres` | PostgreSQL with PostGIS: the three databases of `ARC-17` |
+| `orchestrator-web` | The orchestrator's web interface |
+| `orchestrator-daemon` | Schedules, sensors, automation, and the run queue |
+| `pipeline` | The code server that holds the pipeline definitions and executes runs |
 | `app-labeling` | The labeling application |
 | `app-explorer` | The exploration and feedback application |
+| `sqlweb` | A web SQL client for people without a local client |
 
 - **PLT-10 (MUST)** The compose file declares an explicit project name
   (`name: opa`). The project name never depends on the directory.
@@ -74,17 +87,21 @@ Services run under Docker Compose from `deploy/compose.yaml`.
 - **PLT-13 (MUST)** The `postgres` service sets `shm_size` to at least
   8 GB. Parallel queries exchange data through shared memory, and the
   container default (64 MB) makes large parallel joins fail.
-- **PLT-14 (MUST)** The `postgres` service has a health check
-  (`pg_isready`) and a `stop_grace_period` of at least 2 minutes.
+- **PLT-14 (MUST)** Every service has a health check. `postgres` has a
+  `stop_grace_period` of at least 2 minutes.
 - **PLT-15 (MUST)** Images are pinned by digest. Updating an image is a
   reviewed change.
 - **PLT-16 (MUST)** Published ports bind to the address in `OPA_BIND_HOST`
   (the host's private overlay address in production, `127.0.0.1`
-  otherwise). Ports are configuration (`OPA_PG_PORT`, `OPA_SQLWEB_PORT`,
-  and one per application). Nothing binds to all interfaces.
+  otherwise). Ports are configuration. Nothing binds to all interfaces.
 - **PLT-17 (MUST)** Container logs are size-limited and rotated.
 - **PLT-18 (MUST)** No credential appears in the compose file or in an
   image. Credentials come from files outside the repository (`SEC-30`).
+- **PLT-19 (MUST)** The project's own services (`orchestrator-web`,
+  `orchestrator-daemon`, `pipeline`, and both applications) run one
+  image, built from a tagged release and published to the container
+  registry (`DLV-43`). The host never runs project code from a working
+  copy in production.
 
 ## 4. PostgreSQL
 
@@ -108,16 +125,15 @@ Services run under Docker Compose from `deploy/compose.yaml`.
 | `postgis` | Geometry types, spatial indexes and functions | Required |
 | `btree_gist` | Combined equality and range indexes; exclusion constraints | Required |
 | `pg_stat_statements` | Query statistics | Required |
-| `pgcrypto` | Keyed hashing inside the database when needed | Required |
 | `pg_duckdb` | Reading the lake from inside PostgreSQL | Optional (`PLT-24`) |
 
-- **PLT-23 (MUST)** Only the extensions in this table are installed. In
-  particular, no geocoder or topology extension is installed.
+- **PLT-23 (MUST)** Only the extensions in this table are installed in the
+  `opa` database. In particular, no geocoder or topology extension is
+  installed.
 - **PLT-24 (MAY)** `pg_duckdb` is adopted if a time-boxed evaluation in
-  phase P1 shows that, on the chosen image, views over lake Parquet files
-  can be created, granted to read-only roles, and queried with partition
-  pruning. If adopted, the lake is mounted read-only into the container
-  and exposed as views in a schema named `lake`. If not adopted, the lake
+  phase P1 shows that lake tables can be exposed as views, granted to
+  read-only roles, and queried with partition pruning, without giving
+  those roles access to personal columns. If it is not adopted, the lake
   is queried with DuckDB directly (`OPS-14`), and nothing else in this
   specification changes.
 
@@ -125,7 +141,7 @@ Services run under Docker Compose from `deploy/compose.yaml`.
 
 Configuration lives in `deploy/postgres/postgresql.conf`, mounted
 read-only. The values below are for the reference host, where PostgreSQL
-shares memory and cores with the pipeline (section 5).
+shares memory and cores with the pipeline (section 6).
 
 | Setting | Value | Reason |
 | --- | --- | --- |
@@ -148,7 +164,7 @@ shares memory and cores with the pipeline (section 5).
 | `checkpoint_timeout` | `15min` | Fewer, smoother checkpoints |
 | `checkpoint_completion_target` | `0.9` | Spread checkpoint writes |
 | `wal_compression` | `zstd` | Smaller write-ahead log during loads |
-| `max_connections` | `60` | A small, known set of clients |
+| `max_connections` | `100` | Analysts, applications, the orchestrator, and lake catalog clients |
 | `shared_preload_libraries` | `pg_stat_statements` | Plus `pg_duckdb` if adopted |
 | `password_encryption` | `scram-sha-256` | |
 | `timezone`, `log_timezone` | `UTC` | |
@@ -174,33 +190,54 @@ shares memory and cores with the pipeline (section 5).
   re-derived from measurements (`pg_stat_statements`, checkpoint and
   temporary-file logs) and this table is updated.
 
-## 5. Sharing the host between the database and the pipeline
+## 5. Orchestrator and pipeline services
+
+- **PLT-32 (MUST)** The orchestrator is deployed in its standard
+  open-source form: a web service, a daemon, and a code server, with all
+  of its storage (runs, events, schedules) in the `opa_orchestrator`
+  database.
+- **PLT-33 (MUST)** Runs are queued and executed as processes of the
+  `pipeline` service. The orchestrator is not given access to the
+  container runtime.
+- **PLT-34 (MUST)** Concurrency is limited by the orchestrator's own
+  controls: a cap on simultaneous runs, and a pool of size one for heavy
+  work (a month of inference, a publish, lake maintenance), so that at
+  most one heavy step runs at a time.
+- **PLT-35 (MUST)** The `pipeline` service mounts BULK read-write and has
+  network access to the three databases and to the remote raw store. The
+  applications mount nothing from BULK.
+- **PLT-36 (MUST)** The orchestrator's web interface has no
+  authentication of its own. It is reachable only from the operator's
+  devices (`SEC-44`).
+
+## 6. Sharing the host between the database and the pipeline
 
 | Consumer | Memory budget |
 | --- | --- |
 | PostgreSQL shared buffers | 12 GB |
 | PostgreSQL query memory | Up to about 8 GB |
-| Pipeline compute (DuckDB memory limit plus worker processes) | 28 GB (`ops.compute_memory_gb`) |
+| Pipeline compute (query engine memory limit plus worker processes) | 28 GB (`ops.compute_memory_gb`) |
 | Operating system cache and headroom | The remainder |
 
 - **PLT-30 (MUST)** Pipeline compute respects `ops.compute_memory_gb` and
-  `ops.compute_workers` (default 20). DuckDB sessions set an explicit
-  memory limit, thread count, and a temporary directory on FAST.
-- **PLT-31 (MUST)** Heavy tasks (a month of inference, a publish, a backup
-  of the lake) take a host-wide exclusive lock so that at most one runs at
-  a time.
+  `ops.compute_workers` (default 20). Every DuckDB session, including
+  those opened by dbt, sets an explicit memory limit, thread count, and a
+  temporary directory on FAST.
+- **PLT-31 (MUST)** A heavy pipeline step and a backup of the lake never
+  run at the same time (`PLT-34`, `BKP-5`).
 
-## 6. Observability
+## 7. Observability
 
-- **PLT-40 (MUST)** PostgreSQL logs are kept for at least 30 days.
+- **PLT-40 (MUST)** PostgreSQL logs are kept for at least 30 days. The
+  orchestrator keeps its run history indefinitely.
 - **PLT-41 (MUST)** `pg_stat_statements` is enabled, and a weekly report
-  of the slowest and most frequent queries is written to `meta`
-  (`OPS-33`).
+  of the slowest and most frequent queries is produced (`OPS-33`).
 - **PLT-42 (MUST)** The health check (`OPS-31`) covers: services up,
-  database accepting connections, free space per tier, last backup age and
-  status, last pipeline run status, disk health.
+  databases accepting connections, the orchestrator daemon's heartbeat,
+  free space per tier, last backup age and status, failed runs, disk
+  health.
 
-## 7. Capacity plan
+## 8. Capacity plan
 
 Planning estimates, to be replaced by measurements after milestone M1.
 
@@ -209,13 +246,14 @@ Planning estimates, to be replaced by measurements after milestone M1.
 | Lake: bronze AVL | 2 GB |
 | Lake: silver AVL | 2 GB |
 | Lake: bronze and silver AFC | 0.5 GB |
-| Lake: inference, per retained build | 1.5 GB |
-| Lake: gold, per retained build | 1.5 GB |
-| Database: gold and inference | 8 GB |
-| Database: silver AFC | 5 GB |
-| Database: silver AVL (optional publication) | 20 GB |
+| Lake: inference | 1.5 GB |
+| Lake: gold | 1.5 GB |
+| Serving database: gold and inference | 8 GB |
+| Serving database: silver AFC | 5 GB |
+| Serving database: silver AVL (optional publication) | 20 GB |
 
-The raw mirror's size is unknown until the inventory (`RAW-3`).
+The raw mirror's size is unknown until the inventory (`RAW-3`). Retained
+snapshots add to the lake only the files that changed between them.
 
 - **PLT-50 (MUST)** The set of months published to the serving database is
   configurable per table group (`publish.window.*`). Defaults: gold and
@@ -224,13 +262,15 @@ The raw mirror's size is unknown until the inventory (`RAW-3`).
 - **PLT-51 (MUST)** `opa ops capacity` projects tier usage for a requested
   window from measured sizes and refuses a publish that would not fit.
 
-## 8. Acceptance
+## 9. Acceptance
 
 The platform is accepted when:
 
 1. `opa ops preflight` passes and reports the device behind each tier.
-2. A reboot of the host brings every service back without intervention.
+2. A reboot of the host brings every service back without intervention,
+   and scheduled work resumes.
 3. A parallel hash join over a table of at least 100 million rows
    completes with parallel workers enabled.
 4. A deliberate `docker compose down` followed by `up` loses no data.
 5. Every non-default setting is in the repository with its reason.
+6. The stack validation of phase P1 (`17-roadmap.md`) has passed.

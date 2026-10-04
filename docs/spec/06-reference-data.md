@@ -8,27 +8,29 @@ code.
 
 ## 1. Rules
 
-- **REF-1 (MUST)** Reference data lives in the repository under `ref/` as
-  plain files (CSV for tables, GeoJSON for geometry, TOML for
-  parameters). Nothing that qualifies as reference data is written as a
-  literal in code or kept only in a notebook.
+- **REF-1 (MUST)** Reference tables live in the repository as dbt seeds:
+  CSV files under `dbt/seeds/`, with geometry written as well-known
+  text. Parameters live in `config/parameters.toml`. Nothing that
+  qualifies as reference data is written as a literal in code or kept
+  only in a notebook.
 - **REF-2 (MUST)** Every reference row records where it came from:
   `source` (a document, a person, or "derived from data" with the
   analysis that derived it), `added_on`, and an optional `note`. Rows
   that describe the world also carry `valid_from` and `valid_to`.
-- **REF-3 (MUST)** Each reference file has a schema. `opa ref validate`
-  checks types, keys, references between files, and geometry validity. It
-  runs in continuous integration.
+- **REF-3 (MUST)** Each seed has a declared schema and dbt tests for
+  types, keys, references between seeds, and geometry validity. They run
+  in continuous integration and on every load.
 - **REF-4 (MUST)** Reference data changes by pull request. The reference
-  version is a digest of the `ref/` directory and is recorded on every
-  build (`ARC-43`).
-- **REF-5 (MUST)** Reference data is loaded into the `ref` schema of the
-  serving database on every publish, so analysts see exactly what the
-  release used.
+  version is a digest of the seed files and the parameter file, and is
+  recorded on every materialization and every release (`ARC-43`).
+- **REF-5 (MUST)** Seeds are loaded into the lake's `ref` schema and
+  published to the `ref` schema of the serving database with every
+  release, so analysts see exactly what the release used.
 - **REF-6 (MUST)** Every enumerated value that appears in data (an
   activity type, a status, a reason code, a flag) is defined in a
   reference table with a stable code and a description. Code never emits
-  an enumerated value that is not defined there.
+  an enumerated value that is not defined there, and a dbt test on every
+  enumerated column enforces it.
 
 ## 2. Tables
 
@@ -59,8 +61,9 @@ code.
 | --- | --- |
 | `ref.route_direction_rule` | How the AFC direction code maps to `I` and `V`: a default rule plus per-route exceptions with validity dates and evidence |
 | `ref.gtfs_direction_rule` | How a GTFS shape identifier encodes direction |
-| `ref.raw_path_rule` | How raw paths map to source, dataset, and period |
+| `ref.raw_path_rule` | How raw paths map to source, table, and period |
 | `ref.filename_correction` | Explicit corrections for raw file names that are wrong |
+| `ref.acknowledged_anomaly` | Known, explained anomalies that a check should not fail on (`DQ-14`) |
 
 - **REF-8 (MUST)** The default mapping is code 0 to `I` and code 1 to `V`.
   The known exception (route 614, reversed) is the first row of
@@ -84,9 +87,10 @@ code.
 | `meaning_status` | `unknown`, `inferred`, or `confirmed` |
 | `evidence` | What supports the label |
 
-- **REF-9 (MUST)** Every code observed in silver has a row. A code seen
-  for the first time is added automatically with `meaning_status =
-  unknown` and `fare_class = unknown`, and raises a notice.
+- **REF-9 (MUST)** Every code observed in silver has a row. A test fails
+  when silver holds a code that the seed does not, so a code seen for
+  the first time is added by a person, with `meaning_status = unknown`
+  and `fare_class = unknown` until something is known.
 - **REF-10 (MUST)** A meaning is never guessed in code. `inferred` rows
   cite the profile that supports them (`INF-80`); `confirmed` rows cite
   the agency or an official document.
@@ -109,12 +113,15 @@ code.
 ## 3. Parameters
 
 - **REF-20 (MUST)** Every tunable value is a named parameter in
-  `ref/parameters.toml` with: name, value, unit, the document that owns
-  it, and its justification (a profile fact, an analysis, or "initial
-  value, to be tuned in phase N"). Code reads parameters through one typed
-  accessor. A literal threshold in code is a defect.
-- **REF-21 (MUST)** The digest of the parameter file is recorded on every
-  build. Changing a parameter makes the affected outputs stale.
+  `config/parameters.toml` with: name, value, unit, the document that
+  owns it, and its justification (a profile fact, an analysis, or
+  "initial value, to be tuned in phase N"). Python reads parameters
+  through one typed accessor, and dbt receives the same values as
+  variables from the same file. A literal threshold in code or SQL is a
+  defect.
+- **REF-21 (MUST)** The digest of the parameter file is part of the
+  reference version (`REF-4`). Changing a parameter makes the affected
+  tables stale (`ARC-52`).
 - **REF-22 (MUST)** A parameter marked "initial value" is revisited in the
   phase named, and its justification is replaced by the analysis that
   set it.
@@ -126,7 +133,8 @@ code.
 | `time.operational_day_cutoff` | 03:00 | local time | Profile: tap volume is lowest 02:00 to 03:59 |
 | `time.day_margin_min` | 30 | minutes | Initial value, P5 |
 | `geo.metric_crs` | EPSG:31984 | | SIRGAS 2000, UTM zone 24S |
-| `geo.area_bbox` | 3.6 S to 4.0 S, 38.3 W to 38.8 W | degrees | Initial value, P0 (to cover the whole metropolitan service area) |
+| `geo.area_bbox` | 3.6 S to 4.0 S, 38.3 W to 38.8 W | degrees | Initial value, P4 (to cover the whole metropolitan service area) |
+| `ingest.afc_late_months` | 2 | months | Initial value, P4: how long after a service date its taps can still arrive |
 | `zone.garage_radius_m` | 150 | m | Initial value, P4 |
 | `zone.terminal_radius_m` | 120 | m | Initial value, P4 |
 | `track.max_speed_kmh` | 100 | km/h | Profile: 0.17% of consecutive pings exceed it |
@@ -145,7 +153,9 @@ code.
 | `link.tap_window_s` | 60 | s | Profile: tap coordinates coincide with a ping within 60 s |
 | `link.tap_match_m` | 50 | m | Profile: median 0 m, 75th percentile 14 m for the true device |
 | `link.tap_contradict_m` | 500 | m | Profile: rival devices are a median 3.2 km away |
+| `link.min_taps` | 10 | taps | Initial value, P6: fewest geotagged taps in a day for the tap-position method to decide alone |
 | `link.accept_confidence` | 0.95 | probability | Initial value, P6 |
+| `method.max_unresolved_frac` | 0.02 | fraction | Initial value, P5: share of cases a baseline method may leave unresolved before the full method is required (`INF-6`) |
 | `pattern.proposal_min_runs` | 20 | runs | Initial value, P7 |
 | `pattern.proposal_min_days` | 5 | days | Initial value, P7 |
 | `pattern.proposal_min_buses` | 3 | buses | Initial value, P7 |
@@ -162,12 +172,11 @@ code.
 | `ops.compute_memory_gb` | 28 | GB | Reference host has 60 GB |
 | `ops.min_free_fraction` | 0.10 | fraction | |
 | `ops.sandbox_max_gb` | 20 | GB | Initial value, P1 |
-| `ops.auto_ingest` | off | | Builds and releases are always started by a person |
 | `publish.window.gold` | all released months | | `PLT-50` |
 | `publish.window.silver_afc` | all released months | | `PLT-50` |
 | `publish.window.silver_avl` | the reference year | | `PLT-50` |
 | `publish.parallelism` | 6 | connections | Initial value, P8 |
-| `dq.build_retention_days` | 30 | days | |
+| `dq.snapshot_retention_days` | 30 | days | How long snapshots not held by a release are kept |
 | `dq.release_retention` | 3 | releases | |
 | `gate.model_min_gain` | 1.0 | percentage points | Initial value, P8 |
 | `gate.regression_tolerance` | 0.5 | percentage points | Initial value, P8 |
@@ -181,6 +190,6 @@ they belong to (`INF-95`, `DQ-12`).
 
 ## 4. Acceptance
 
-Reference data is accepted when `opa ref validate` passes, every zone has
-a valid polygon, every code observed in the reference month has a row in
+Reference data is accepted when every seed test passes, every zone has a
+valid polygon, every code observed in the reference month has a row in
 `ref.afc_code`, and every parameter has a recorded basis.

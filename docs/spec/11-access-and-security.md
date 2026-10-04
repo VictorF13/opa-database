@@ -8,10 +8,13 @@ programs never receive privileges directly.
 | Role | Kind | Purpose |
 | --- | --- | --- |
 | `opa_owner` | No login | Owns every schema and object |
-| `opa_pipeline` | Login | The pipeline: member of `opa_owner`; loads, publishes, writes `meta` |
+| `opa_pipeline` | Login | The pipeline in the `opa` database: member of `opa_owner`; publishes releases, writes `ops` |
+| `opa_lake` | Login | The pipeline's access to the lake catalog database |
+| `opa_lake_read` | Login | Read-only access to the lake catalog, for `opa lake shell` |
+| `opa_orchestrator` | Login | The orchestrator's access to its own database |
 | `opa_app_labeling` | Login | The labeling application |
 | `opa_app_explorer` | Login | The exploration application |
-| `opa_read_gold` | Group | Read `gold`, `ref`, and release information |
+| `opa_read_gold` | Group | Read `gold`, `ref`, and `meta` |
 | `opa_read_inference` | Group | Read `inference` |
 | `opa_read_silver` | Group | Read `silver`, except personal columns |
 | `opa_read_pii` | Group | Read personal columns (`card_id`) |
@@ -22,8 +25,10 @@ programs never receive privileges directly.
 | Personal roles | Login | One per person, member of the groups that person needs |
 | `opa_admin` | Superuser | Break-glass administration only |
 
-- **SEC-1 (MUST)** Privileges on schemas and objects are granted only to
-  group roles. A person's access is the set of groups their personal
+- **SEC-1 (MUST)** Each of the three databases (`ARC-17`) has its own
+  roles, and no role can connect to a database it has no business in.
+  In the `opa` database, privileges on schemas and objects are granted
+  only to group roles. A person's access is the set of groups their personal
   role belongs to.
 - **SEC-2 (MUST)** Roles, memberships, grants, default privileges, and
   per-role settings are defined as idempotent SQL in `db/roles/` and
@@ -34,7 +39,7 @@ programs never receive privileges directly.
 - **SEC-4 (MUST)** No application and no pipeline step connects as a
   superuser. `opa_admin` is used for instance administration only; its
   credential is held by the system owner; every use is recorded in the
-  operations log.
+  operations log (`OPS-35`).
 - **SEC-5 (MUST)** Each person has their own login role. There are no
   shared accounts. Adding and removing a person follows a runbook and is
   a reviewed change to `db/roles/`.
@@ -82,7 +87,7 @@ The usual researcher profile is `opa_read_gold`, `opa_read_inference`,
   it, object by object and role by role.
 - **SEC-12 (MUST)** Verification runs after every `roles apply` and at
   the end of every publish. A difference fails the publish. Access can
-  therefore never be lost or widened by a build.
+  therefore never be lost or widened by a publish.
 - **SEC-13 (MUST)** Publishing never drops a schema. Tables are swapped
   inside existing schemas (`PERF-31`), so schema-level privileges and
   default privileges persist.
@@ -150,10 +155,11 @@ personal data under Brazilian data protection law (LGPD).
 
 ## 4. Network and host
 
-- **SEC-40 (MUST)** The database, the web SQL client, and the
-  applications listen only on the host's private overlay address. Access
-  control lists of the overlay network restrict those ports to project
-  members' devices. The lists are documented in the runbook.
+- **SEC-40 (MUST)** The database, the web SQL client, the applications,
+  and the orchestrator's web interface listen only on the host's private
+  overlay address. Access control lists of the overlay network restrict
+  each port to the devices of the people who need it. The lists are
+  documented in the runbook.
 - **SEC-41 (MUST)** Traffic is encrypted in transit by the overlay
   network. If any service is ever reachable outside it, TLS on that
   service becomes mandatory first.
@@ -162,6 +168,13 @@ personal data under Brazilian data protection law (LGPD).
   automatically.
 - **SEC-43 (MUST)** Third-party images (the web SQL client) are pinned by
   digest and updated on the same schedule as the database (`PLT-21`).
+- **SEC-44 (MUST)** The orchestrator's web interface can launch any run
+  and has no login of its own. Reaching it is therefore an operator
+  privilege: its port is open only to the operator's devices.
+- **SEC-45 (MUST)** Direct access to the lake (its catalog database and
+  its files) exposes every layer, including personal columns. It is
+  limited to the pipeline and to people who hold `opa_read_pii`.
+  Everyone else reads the serving database.
 
 ## 5. Audit
 

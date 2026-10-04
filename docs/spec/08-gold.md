@@ -10,6 +10,7 @@ new inference.
 - **GLD-1 (MUST)** Gold is a dimensional model. Tables are named
   `dim_<entity>`, `fact_<event>`, `bridge_<relation>`, and
   `agg_<subject>_<grain>`, in snake case, with singular entity names.
+  Each table is a dbt model.
 - **GLD-2 (MUST)** Gold is complete. `fact_boarding` has one row for
   every tap in silver and `fact_afc_trip` one row for every trip record,
   whatever their category. Filtering is the reader's choice, made easy
@@ -30,10 +31,11 @@ new inference.
   constrained (`PERF-28`).
 - **GLD-7 (MUST)** Column names carry their unit: `_m` (meters), `_s`
   (seconds), `_kmh`, `_frac` (0 to 1), `_at` (instant), `_date`.
-- **GLD-8 (MUST)** Every table and every column has a comment in the
-  serving database stating meaning, unit, and origin. The data
-  dictionary in the documentation is generated from these comments
-  (`ENG-56`). A table without complete comments fails the publish check.
+- **GLD-8 (MUST)** Every table and every column has a description in its
+  dbt model stating meaning, unit, and origin. The descriptions are
+  published as the data dictionary (`ENG-56`) and written as comments on
+  the served tables. A model with a missing description fails continuous
+  integration (`ENG-61`).
 - **GLD-9 (MUST)** Dimensions whose attributes change over time keep
   history with validity intervals (`valid_from`, `valid_to`). A fact
   always joins to the version valid on its date.
@@ -164,18 +166,14 @@ durations by type, runs, linked bus, device class.
 
 ## 4. Summary tables
 
-Summary tables exist for the questions asked most often. They are built
-in the lake with the facts, not as database views.
-
-| Table | Grain | Measures |
-| --- | --- | --- |
-| `agg_route_day` | Route, direction, operational day | Runs, full runs, partial runs, passenger boardings, service distance, first and last departure |
-| `agg_route_hour` | Route, direction, operational day, hour | Runs started, passenger boardings, median run duration |
-| `agg_stop_day` | Stop, operational day | Passenger boardings, stop events observed, median dwell |
+The facts are the product (`00-overview.md`, section 1). No summary table
+is required at the start. One is added when a recurring question
+justifies it.
 
 - **GLD-20 (MUST)** A summary table is added only with a stated question
-  it answers, a definition in terms of the facts, and a check that it
-  reconciles with them (`DQ-11`).
+  it answers, a definition in terms of the facts, and a test that it
+  reconciles with them (`DQ-11`). It is a dbt model in the lake, not a
+  database view.
 
 ## 5. Views for common use
 
@@ -188,13 +186,15 @@ in the lake with the facts, not as database views.
 | `v_passenger_boarding` | Taps with `fare_class = passenger`, with their run and boarding stop |
 | `v_run_service` | Runs with service evidence |
 | `v_bus_day_timeline` | For a bus and day: its activities, runs, trip records, and taps on one timeline |
+| `v_headway` | For each timed stop event: the time since the previous vehicle of the same route and direction at that stop |
 
 - **GLD-31 (MUST)** Wherever a view offers one "effective" value where
   both a declared and an observed value exist, it uses the observed
   value when present and the declared one otherwise, exposes a column
   naming which was used, and says so in its comment.
 - **GLD-32 (MUST)** Views are part of the published interface: defined in
-  migrations, tested, and documented like tables.
+  the serving database's migrations, tested against the facts
+  (`DQ-11`), and documented like tables.
 
 ## 6. Pings
 

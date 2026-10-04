@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Draft 1, for review |
+| Status | Draft 2, for review |
 | Date | 2026-10-04 |
 | Owner | Victor Abreu |
 | Language | English (application user interfaces are in Brazilian Portuguese) |
@@ -26,20 +26,20 @@ Read in order the first time. Each document can also be read alone.
 | --- | --- | --- |
 | 00 | [Overview](00-overview.md) | Purpose, goals, non-goals, principles, key decisions |
 | 01 | [Source data](01-source-data.md) | The raw sources, their formats, and what is known about them |
-| 02 | [Architecture](02-architecture.md) | Layers, storage, compute, identifiers, time, builds and releases |
-| 03 | [Platform](03-platform.md) | Host, storage tiers, containers, PostgreSQL configuration |
+| 02 | [Architecture](02-architecture.md) | Layers, the lake, compute and orchestration, identifiers, time, snapshots and releases |
+| 03 | [Platform](03-platform.md) | Host, storage tiers, containers, PostgreSQL configuration, orchestrator deployment |
 | 04 | [Raw and bronze](04-raw-and-bronze.md) | Fetching raw files, the manifest, lossless bronze |
 | 05 | [Silver](05-silver.md) | Typed, cleaned, conformed tables per source |
 | 06 | [Reference data](06-reference-data.md) | Curated lists: companies, zones, overrides, code dictionaries, parameters |
 | 07 | [Inference](07-inference.md) | Vehicle timelines, bus and device linkage, patterns, reconciliation, stop events |
 | 08 | [Gold](08-gold.md) | The analysis-ready data model |
-| 09 | [Quality and lineage](09-quality-and-lineage.md) | Checks, accounting, metadata, builds, releases |
+| 09 | [Quality and lineage](09-quality-and-lineage.md) | Checks, accounting, lineage, snapshots, releases |
 | 10 | [Performance](10-performance.md) | Physical design and performance budgets |
 | 11 | [Access and security](11-access-and-security.md) | Roles, privileges, privacy, secrets, network |
 | 12 | [Backup and recovery](12-backup-and-recovery.md) | What is protected, how, and how recovery is proven |
 | 13 | [Engineering](13-engineering.md) | Repository layout, tooling, code, tests, documentation standards |
 | 14 | [Delivery](14-delivery.md) | Branching, commits, pull requests, issues, CI, releases, deployment |
-| 15 | [Operations](15-operations.md) | Command line interface, scheduling, monitoring, runbooks |
+| 15 | [Operations](15-operations.md) | Launching and sequencing work, the command line, scheduling, monitoring, runbooks |
 | 16 | [Applications and feedback](16-apps-and-feedback.md) | Labeling and exploration apps, labels, the improvement loop |
 | 17 | [Roadmap](17-roadmap.md) | Build phases with acceptance criteria |
 | 18 | [Coexistence](18-coexistence.md) | Isolation from pre-existing deployments on the host |
@@ -92,9 +92,9 @@ configuration (see `REF-20`), never as literals scattered through code.
 
 Statements marked **Profile** are measurements of the source data taken on
 a sample (November 2023 unless stated otherwise). They explain why the
-design looks the way it does. They are not guarantees: phase P0 of the
-[roadmap](17-roadmap.md) re-measures every one of them on the full raw
-store, and a profile fact that turns out to be wrong is corrected here
+design looks the way it does. They are not guarantees: phases P2 and P4
+of the [roadmap](17-roadmap.md) re-measure every one of them on the full
+raw store, and a profile fact that turns out to be wrong is corrected here
 before the design that relies on it is built.
 
 ## Changing this specification
