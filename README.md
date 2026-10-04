@@ -4,6 +4,12 @@ A data pipeline that turns Fortaleza, Brazil's raw public transit data
 (fare collection, GPS/AVL, GTFS schedules, and the vehicle registry) into a
 queryable, analysis-ready PostgreSQL+PostGIS database.
 
+## Specification
+
+The system to be built is specified in
+[`docs/spec/`](docs/spec/README.md). The specification is the source of
+truth for new work. The code and the description below predate it.
+
 ## Overview
 
 The pipeline follows a two-layer ("medallion") architecture:

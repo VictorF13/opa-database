@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Specification
+
+`docs/spec/` specifies the system to be built (start at
+`docs/spec/README.md`). It is the source of truth for new work: follow it
+whenever a task concerns anything it describes. The commands and
+architecture below describe the implementation that predates it.
+
 ## Commands
 
 ```bash
