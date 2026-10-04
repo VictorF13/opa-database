@@ -1,115 +1,72 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
+
+## Read this first
+
+- **The specification is the source of truth.** The system to build is
+  specified in `docs/spec/` (start at `docs/spec/README.md`). Follow it,
+  and refer to its requirements by identifier (for example `BRZ-4`).
+- **The existing code is not a design input.** `src/`, `ml/`, and
+  `tools/` hold the previous implementation. Do not copy its structure,
+  names, or decisions into anything built from the specification. It
+  stays in the tree until phase P0 of the roadmap
+  (`docs/spec/17-roadmap.md`) removes it.
+- **`docs/archive/` describes that previous implementation.** It is kept
+  for reference only and is out of date in places.
+- When the specification and anything else disagree, the specification
+  wins. If the specification itself looks wrong, say so and propose the
+  change; do not work around it silently.
+
+## Do not touch the running database
+
+A PostgreSQL database that people use every day runs on this host, from
+the `docker-compose.yml` at the repository root. It is a protected
+resource (`docs/spec/18-coexistence.md`).
+
+- Never run `docker compose up`, `down`, `restart`, or any command that
+  stops, recreates, or removes its containers or its data volume.
+- Never edit, move, or rename the root `docker-compose.yml` or `.env`.
+  Do not read `.env` either; connection settings come from
+  `opa_database.config.settings`.
+- Never run the previous implementation's commands that write to it:
+  `opa-database load-silver`, `load-silver-reference`, `build-gold`,
+  `build-diamond`. They drop and replace data.
+- Reading it for analysis is fine, in a read-only transaction.
+
+## This repository is public
+
+Commit no real data, no credentials, no personal or account names, and
+no network addresses.
 
 ## Commands
 
 ```bash
-uv sync                          # install/sync dependencies (Python 3.12 required, see below)
-docker compose up -d             # start Postgres+PostGIS (:5432) and Adminer (:8080)
-
-uv run ruff format --check .     # formatting
-uv run ruff check .              # linting
-uv run ty check                  # type checking
-uv run pytest                    # tests (currently no test suite yet; CI tolerates exit code 5)
-
-# Bronze/silver pipeline (Click CLI, entry point `opa-database`)
-uv run opa-database ingest {avl,afc,gtfs} --year Y --month M
-uv run opa-database ingest-reference vehicle_dictionary
-uv run opa-database load-silver {avl,afc,gtfs} --year Y --month M
-uv run opa-database load-silver-reference vehicle_dictionary
-
-uv run prek run --all-files   # dry-run every pre-commit hook before committing
+uv sync                        # install the pinned environment
+uv run ruff format --check .   # formatting
+uv run ruff check .            # linting
+uv run ty check                # type checking
+uv run pytest                  # tests
+uv run prek run --all-files    # every pre-commit hook
 ```
 
-There's no single-test invocation documented yet since the pytest suite is
-empty; use standard `pytest path::test_name` once tests exist.
+## Working rules
 
-**Before considering any code change done** (this includes notebooks),
-run `uv run prek run --all-files` and fix everything it reports — don't
-stop at a clean `ruff check` in isolation; `prek` also runs `ruff
-format`, `ty check`, and the `requirements*.txt`/`uv.lock` sync hooks.
-Two gotchas learned the hard way:
-
-- `prek run --all-files` only checks files **git already tracks**. A
-  freshly created, still-untracked file (e.g. a new notebook) is
-  silently skipped — `git add` it first, or run `ruff
-  check`/`ruff format --check`/`ty check` directly against the new
-  path(s), before trusting a clean `prek` result.
-- The `ruff-check`/`ruff-format` hooks cover `.ipynb` files, not just
-  `.py` — don't assume notebooks are exempt from linting.
-
-Always invoke Python through `uv run` (`uv run <script.py>`, `uv run
-pytest`, ...) rather than calling `python`/`python3` directly, so it runs
-against this project's synced environment and pinned Python version.
-Manage dependencies with `uv add "pkg"` / `uv add --dev "pkg"` /
-`uv remove pkg`, never by hand-editing `pyproject.toml` (that also keeps
-`uv.lock` in sync; `requirements.txt`/`requirements-dev.txt` are
-regenerated from it by pre-commit, not edited directly).
-
-Every public module/class/function needs a Google-style docstring
-(imperative summary line, then `Args:`/`Returns:`/`Raises:` sections as
-needed). See `src/opa_database/config.py` or
-`src/opa_database/loaders/silver.py::replace_period` for the existing
-convention to match.
-
-**Python version is pinned to 3.12** (`pyproject.toml`, `.python-version`).
-
-## Architecture
-
-This is a two-layer ("medallion") pipeline turning Fortaleza, Brazil's
-raw public transit data into a queryable PostgreSQL+PostGIS database:
-**bronze** (raw files -> typed Parquet) -> **silver** (Parquet -> per-source
-normalized Postgres tables). Full rationale in `docs/architecture.md`; the
-essential cross-file structure is:
-
-### Bronze (`src/opa_database/{adapters,contracts}/`, `loaders/bronze.py`)
-
-One **adapter** + one **contract** (Pandera `DataFrameModel`) per source
-(`avl`, `afc`, `gtfs`, `vehicle_dictionary`). The adapter finds/parses raw
-files, validates against the contract, and calls the shared
-`loaders/bronze.py::write_bronze` to emit one Hive-partitioned Parquet file
-per invocation. **Each source partitions by a different notion of "period"**:
-this is the single most important thing to know before touching bronze.
-
-- AVL: day the GPS ping occurred.
-- AFC: day the **dump file** arrived, not the ridership `service_date`.
-  Dumps are a delayed-upload backlog (validators buffer offline and upload
-  late), so one dump can span weeks of `service_date`s. `event_id` is
-  globally unique across dumps, so this is late delivery, not
-  resend/correction.
-- GTFS: day the feed **export** happened (`feed_version_date`), a whole
-  snapshot, not a calendar period.
-- Vehicle dictionary: day it was **snapshotted**. It's a live reference
-  file, not a time series.
-
-### Silver (`src/opa_database/silver/`, `loaders/silver.py`)
-
-One loader module per source, all built on the single shared primitive
-`loaders/silver.py::replace_period`: bootstrap the table DDL, then inside
-one transaction, drop indexes -> `DELETE` the target period -> bulk `COPY`
--> recreate indexes. This is what makes reloading a period idempotent
-(delete-then-insert, not append). Every source's silver period key matches
-its bronze partition key.
-
-Silver is **strictly per-source and stays flat/denormalized** (e.g.
-`silver.afc_boardings` repeats every trip/line/vehicle/company column on
-every boarding row, ~16.4x redundancy, measured). This is deliberate, not
-unfinished.
-
-Timezones: AFC's raw timestamps are naive Fortaleza local time (UTC-3, no
-DST since 2008) and are converted to UTC during the silver load; AVL/GPS is
-already UTC and is just relabeled `timestamptz`. Don't assume both sources'
-raw timestamps mean the same thing before this conversion.
-
-PostGIS `geometry(Point, 4326)` columns are Postgres `GENERATED ALWAYS AS
-... STORED` columns computed from lat/lon by Postgres itself, not written
-directly; bulk `COPY` only ever carries the plain lat/lon columns.
-
-## CI / release
-
-`.github/workflows/ci.yml`: PR titles are enforced as Conventional Commits;
-`validate` runs ruff format/check + `ty check`; `test` runs pytest
-(tolerates zero tests collected). Releases are fully automated by
-python-semantic-release off `develop`/`main`: version bumps, changelog,
-tags, and GitHub releases are generated from commit history, never hand-edited.
+- Run Python only through uv: `uv run <script.py>`, `uv run pytest`.
+  Never call `python` or `python3` directly, and never `uv run python`.
+- Change dependencies with `uv add`, `uv add --dev`, and `uv remove`,
+  never by editing `pyproject.toml`. `requirements.txt` and
+  `requirements-dev.txt` are generated by the hooks.
+- Before considering any change done, run `uv run prek run --all-files`
+  and fix everything it reports. Two things to know:
+  - It only checks files git already tracks. `git add` new files first.
+  - The Ruff hooks cover notebooks as well as Python files.
+- Every public module, class, and function has a Google-style docstring
+  with `Args:`, `Returns:`, and `Raises:` sections as relevant, written
+  `name (type): description`. See `docs/spec/13-engineering.md`.
+- Pull requests go to `develop` and are squash-merged. Titles are a
+  single-line conventional commit with no scope
+  (`type: description`). Releases are a pull request from `develop` into
+  `main`, merged with a merge commit and never squashed. See
+  `docs/spec/14-delivery.md`.
+- The Python version is pinned in `.python-version`.

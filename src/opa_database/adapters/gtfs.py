@@ -64,7 +64,7 @@ def _match_export_name(name: str) -> tuple[int, int, int] | None:
 
 # Tables where a missing raw file is tolerated: `ingest` substitutes the
 # nearest other export's data instead of failing (see `_read_table_for_export`
-# and `docs/architecture.md`). Every other table still fails loudly on a
+# and `docs/archive/architecture.md`). Every other table still fails loudly on a
 # missing file, since that's an untested, unvetted code path for them.
 _SUBSTITUTABLE_TABLES = frozenset({"calendar_dates", "stop_times"})
 
@@ -246,7 +246,7 @@ def ingest(year: int, month: int) -> list[Path]:
     `calendar_dates.txt`). For tables in `_SUBSTITUTABLE_TABLES`, this is
     tolerated: the nearest other export's data is substituted, and every
     row it writes is tagged via `copied_from_feed_version_date` (see
-    `_read_table_for_export` and `docs/architecture.md`). Any other table
+    `_read_table_for_export` and `docs/archive/architecture.md`). Any other table
     missing its file still raises.
 
     Args:
