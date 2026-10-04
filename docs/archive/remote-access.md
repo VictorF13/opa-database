@@ -1,5 +1,12 @@
 # Remote database access
 
+> **Archived.** This document describes the implementation that predates
+> the [specification](../spec/README.md). It is kept for reference only,
+> is not a design input for new work, and is out of date in places.
+>
+> It is still accurate for reaching the database that currently runs on
+> the host.
+
 The `docker-compose.yml` Postgres+PostGIS instance and Adminer bind to
 `BIND_HOST`, a `.env` variable defaulting to `127.0.0.1` (localhost-only,
 the right default for a fresh local dev setup with no remote access
