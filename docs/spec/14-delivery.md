@@ -12,8 +12,9 @@ exists, it is adopted as is.
   returns to it through a pull request.
 - **DLV-2 (MUST)** `main` is the production branch. Every commit on it is
   a release. It changes only when the release pull request from `develop`
-  is merged (section 7). Nobody commits to it directly, and no branch
-  other than `develop` is ever merged into it.
+  is merged, and by the release commit that the automation adds right
+  after (section 7). Nobody else commits to it, and no branch other than
+  `develop` is ever merged into it.
 - **DLV-3 (MUST)** `develop` is always releasable. Work that is not ready
   for users is switched off by configuration, not parked on a long-lived
   branch.
@@ -25,7 +26,8 @@ This is the two-branch core of Git Flow: an integration branch, and a
 production branch on which every commit is a release. Git Flow's release
 and hotfix branches are not used, because `DLV-3` makes them unnecessary:
 a fix is released by merging it into `develop` and merging the release
-pull request.
+pull request. As in Git Flow, `main` is merged back into `develop` after
+every release, so `develop` always contains everything that `main` does.
 
 ## 2. Commits
 
@@ -74,7 +76,7 @@ pull request.
 
 | Target | Method | Why |
 | --- | --- | --- |
-| `develop` | Squash, and only squash | One commit per change, whose message is the pull request title: a linear, readable history and trivial reverts |
+| `develop` | Squash, and only squash | One commit per change, whose message is the pull request title: a readable history and trivial reverts |
 | `main` | Merge commit, and only a merge commit | `main` receives the commits of `develop` unchanged. A squash or a rebase would create different commits on `main`, and the two branches would drift apart |
 
 - **DLV-17 (MUST)** A pull request into `develop` can merge only when all
@@ -135,13 +137,16 @@ pull request.
 
 - **DLV-25 (MUST)** A ruleset on `develop` requires: a pull request; the
   required status checks; an up-to-date branch; resolved conversations;
-  linear history; squash as the only merge method; no force pushes; no
-  deletion.
+  squash as the only merge method; no force pushes; no deletion. The
+  release automation is the only actor allowed to bypass it, and only to
+  bring `main` back into `develop` (`DLV-46`).
 - **DLV-26 (MUST)** A ruleset on `main` requires: a pull request; a
   merge commit as the only merge method; a required check that fails
   unless the pull request's head branch is `develop`; the required
-  status checks; no force pushes; no deletion. It does not require the
-  branch to be up to date with `main` (`DLV-46`).
+  status checks; an up-to-date branch, which proves that the previous
+  release was brought back into `develop`; no force pushes; no deletion.
+  The release automation is the only actor allowed to bypass it, and
+  only to add the release commit (`DLV-43`).
 - **DLV-27 (MUST)** Tags matching `v*` can be created only by the release
   workflow and can never be moved or deleted.
 - **DLV-28 (MUST)** Repository settings: default branch `develop`; squash
@@ -210,32 +215,36 @@ published data, and records which code release produced it.
 - **DLV-42 (MUST)** Merging the release pull request is the act of
   releasing. A person does it deliberately. Nothing is released as a
   side effect of merging a feature.
-- **DLV-43 (MUST)** On that merge, the release workflow:
-  1. takes the released commit: the head of the merged pull request,
-     which is the commit of `develop` that continuous integration
-     tested;
-  2. creates the tag `v<version>` on that commit;
-  3. publishes a GitHub Release for the tag, with the generated notes;
-  4. builds the packages from the tag with `uv build` and attaches them
-     to the release.
-
-  The merge commit on `main` has the same content and records the
-  promotion.
-- **DLV-44 (MUST)** Package versions are derived from git tags by the
-  build backend at build time (`ENG-17`). No file in the repository
-  stores the version, so releasing creates no commit.
-- **DLV-45 (MUST)** The changelog is the list of GitHub Releases,
-  generated from commit messages. It is never edited by hand, and no
-  changelog file is kept in the repository.
-- **DLV-46 (MUST)** There is no merge back from `main` into `develop`.
-  Releasing adds no content to `main`, so `main` never holds anything
-  that `develop` lacks, and the next release pull request always merges
-  cleanly. Because tags sit on commits of `develop`, version derivation
-  works on both branches.
+- **DLV-43 (MUST)** On that merge, the release workflow, in order:
+  1. computes the version from the commits since the last release;
+  2. writes it everywhere the version is stored (every package's
+     `pyproject.toml` and the lockfile) and adds the new section to
+     `CHANGELOG.md`;
+  3. commits those files to `main` as one release commit,
+     `chore: release <version>`;
+  4. creates the tag `v<version>` on the release commit;
+  5. publishes a GitHub Release for the tag with the same notes;
+  6. builds the packages from the tag with `uv build` and attaches them;
+  7. brings `main` back into `develop` (`DLV-46`).
+- **DLV-44 (MUST)** The version is stored in the repository
+  (`ENG-17`) and `CHANGELOG.md` follows the Keep a Changelog format.
+  Both are written only by the release workflow, never by hand.
+- **DLV-45 (MUST)** The release commit does not start another release,
+  and the push that brings it into `develop` does not open a release
+  pull request, because it holds no releasable commit (`DLV-41`).
+- **DLV-46 (MUST)** After every release `develop` is brought level with
+  `main`, so that it holds the release commit, the version, the
+  changelog, and the tag:
+  - normally by fast-forward, which is possible whenever nothing was
+    merged into `develop` during the release;
+  - otherwise by merging `main` into `develop` with a merge commit;
+  - if that merge conflicts, the workflow stops, raises an alert, and
+    opens a pull request `chore: sync main into develop` for a person to
+    resolve. Until it is merged, the next release pull request cannot be
+    merged (`DLV-26`).
 - **DLV-47 (MUST)** The release tooling is a conventional-commit release
-  tool used only to compute the next version and the notes
-  (python-semantic-release is the reference choice), plus the hosting
-  platform's own pull request and release features.
+  tool (python-semantic-release is the reference choice) plus the
+  hosting platform's own pull request and release features.
 
 ## 8. Deployment
 
@@ -280,7 +289,10 @@ host, never pushed by continuous integration.
 4. Merging a `feat` pull request into `develop` creates or updates the
    release pull request into `main`, with the next minor version in its
    title and the change in its description.
-5. Merging the release pull request produces a tag on the released
-   commit and a GitHub Release with built packages, and creates no
-   commit other than the merge commit on `main`.
-6. `opa ops deploy` installs that release on the host and records it.
+5. Merging the release pull request produces a release commit on
+   `main` with the new version and changelog section, a tag on it, and a
+   GitHub Release with built packages. Afterwards `develop` and `main`
+   point at the same commit.
+6. A release made while `develop` moved ends with `main` merged into
+   `develop`, or with a sync pull request and an alert.
+7. `opa ops deploy` installs that release on the host and records it.

@@ -77,6 +77,10 @@ uv run prek run --all-files
 5. Merging the release pull request is the release. It is merged with a
    merge commit, never squashed and never rebased. `main` is the
    production branch: every commit on it is a release.
+6. The automation then commits the new version and the `CHANGELOG.md`
+   section to `main`, tags that commit, publishes the release, and brings
+   `main` back into `develop` so the two branches are level. The version
+   and the changelog are never edited by hand.
 
 Until the first phase of the roadmap puts every rule of the
 specification into continuous integration and repository settings,
